@@ -50,7 +50,7 @@ index af27f131..5516215a 100644
  
  	if (getGameType() != GType_PP && getGameType() != GType_FF) {
 diff --git a/engines/agos/agos.h b/engines/agos/agos.h
-index 6a8d2237..508b5d6f 100644
+index 6a8d2237..1a30ee6e 100644
 --- a/engines/agos/agos.h
 +++ b/engines/agos/agos.h
 @@ -37,6 +37,7 @@
@@ -79,7 +79,7 @@ index 6a8d2237..508b5d6f 100644
  	bool _vgaVar9;
  	int16 _chanceModifier;
  	bool _restoreWindow6;
-@@ -958,6 +970,14 @@ protected:
+@@ -958,6 +970,15 @@ protected:
  	void renderStringAmiga(uint vgaSpriteId, uint color, uint width, uint height, const char *txt);
  	void renderString(uint vgaSpriteId, uint color, uint width, uint height, const char *txt);
  
@@ -90,15 +90,16 @@ index 6a8d2237..508b5d6f 100644
 +	void chtDrawMap();                 // 動態地圖(現代玩家友善化)
 +	void chtDrawMapLabel(int x, int y, const char *big5);  // 地圖用 16px 中文標籤
 +	bool chtRoomHasTreasure(uint16 roomId);
++	bool chtRoomHasMonster(uint16 roomId);   // 怪物: objectFlags 僅 kOFText(0x01)
 +
  	void writeChar(WindowBlock *window, int x, int y, int offs, int val);
  
  	byte *allocBlock(uint32 size);
 diff --git a/engines/agos/charset-fontdata.cpp b/engines/agos/charset-fontdata.cpp
-index 193986e3..b0c3afef 100644
+index 193986e3..30db1159 100644
 --- a/engines/agos/charset-fontdata.cpp
 +++ b/engines/agos/charset-fontdata.cpp
-@@ -2914,6 +2914,238 @@ static const byte english_pnFont[] = {
+@@ -2914,6 +2914,271 @@ static const byte english_pnFont[] = {
  	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
  };
  
@@ -219,6 +220,27 @@ index 193986e3..b0c3afef 100644
 +	return false;
 +}
 +
++// 怪物: object child 的 objectFlags 只有 kOFText(0x01)、無 icon/size/weight/volume/menu/number。
++// (實測: guard/priest/zombie/mutant/High Priest 皆 0x0001; 可撿道具帶 kOFIcon; 場景/容器帶 size/weight)
++bool AGOSEngine::chtRoomHasMonster(uint16 roomId) {
++	Item *room = derefItem(roomId);
++	if (!room)
++		return false;
++	uint16 cid = room->child;
++	int guard = 0;
++	while (cid && guard++ < 200) {
++		Item *c = derefItem(cid);
++		if (!c)
++			break;
++		SubObject *so = (SubObject *)findChildOfType(c, kObjectType);
++		if (so && so->objectFlags != 0 &&
++			(so->objectFlags & (kOFIcon | kOFSize | kOFWeight | kOFVolume | kOFMenu | kOFNumber)) == 0)
++			return true;
++		cid = c->next;
++	}
++	return false;
++}
++
 +void AGOSEngine::chtDrawMapLabel(int x, int y, const char *big5) {
 +	if (!_scaleBuf || !_cht.font16)
 +		return;
@@ -295,6 +317,10 @@ index 193986e3..b0c3afef 100644
 +	byte gold = wallc; { int best = -1; const byte *p = _currentPalette;
 +		for (int i = 1; i < 256; i++) { int r = p[i*3], g = p[i*3+1], b = p[i*3+2];
 +			if (r > 150 && g > 110 && b < 100) { int sc = r + g - b; if (sc > best) { best = sc; gold = (byte)i; } } } }
++	// 紅色(怪物): 高 R、低 G/B
++	byte red = wallc; { int best = -1; const byte *p = _currentPalette;
++		for (int i = 1; i < 256; i++) { int r = p[i*3], g = p[i*3+1], b = p[i*3+2];
++			if (r > 140 && g < 90 && b < 90) { int sc = r - g - b; if (sc > best) { best = sc; red = (byte)i; } } } }
 +
 +#define MP(X, Y, C) do { int _x=(X), _y=(Y); if (_x>=0 && _x<_scaleBuf->w && _y>=0 && _y<_scaleBuf->h) hp[_y*pitch+_x]=(C); } while(0)
 +	// 背景板
@@ -322,15 +348,23 @@ index 193986e3..b0c3afef 100644
 +			if (d == 3) for (int yy = gy; yy < gy + cell; yy++) MP(gx, yy, wallc);
 +			if (d == 1) for (int yy = gy; yy < gy + cell; yy++) MP(gx + cell - 1, yy, wallc);
 +		}
-+		if (!cur && chtRoomHasTreasure(ids[k])) {   // 寶物: 中心金色方塊
++		if (!cur) {
++			bool tre = chtRoomHasTreasure(ids[k]);
++			bool mon = chtRoomHasMonster(ids[k]);
 +			int cxp = gx + cell / 2, cyp = gy + cell / 2;
-+			for (int yy = cyp - 1; yy <= cyp + 1; yy++)
-+				for (int xx = cxp - 1; xx <= cxp + 1; xx++) MP(xx, yy, gold);
++			if (tre && mon && cell >= 11) {   // 兩者都有: 寶物在上、怪物在下
++				for (int yy = cyp - 3; yy <= cyp - 1; yy++) for (int xx = cxp - 1; xx <= cxp + 1; xx++) MP(xx, yy, gold);
++				for (int yy = cyp + 1; yy <= cyp + 3; yy++) for (int xx = cxp - 1; xx <= cxp + 1; xx++) MP(xx, yy, red);
++			} else if (mon) {   // 怪物(優先警示): 紅點
++				for (int yy = cyp - 1; yy <= cyp + 1; yy++) for (int xx = cxp - 1; xx <= cxp + 1; xx++) MP(xx, yy, red);
++			} else if (tre) {   // 寶物: 金點
++				for (int yy = cyp - 1; yy <= cyp + 1; yy++) for (int xx = cxp - 1; xx <= cxp + 1; xx++) MP(xx, yy, gold);
++			}
 +		}
 +	}
-+	// 圖例: 白格：你所在　黃點：寶物　　ＴＡＢ開關地圖
++	// 圖例: 白格：你所在　黃點：寶物　紅點：怪物　ＴＡＢ開關
 +	chtDrawMapLabel(panelX - 10, panelY + panelH - 6,
-+		"\xa5\xd5\xae\xe6\xa1\x47\xa7\x41\xa9\xd2\xa6\x62\xa1\x40\xb6\xc0\xc2\x49\xa1\x47\xc4\x5f\xaa\xab\xa1\x40\xa1\x40\xa2\xe2\xa2\xcf\xa2\xd0\xb6\x7d\xc3\xf6\xa6\x61\xb9\xcf");
++		"\xa5\xd5\xae\xe6\xa1\x47\xa7\x41\xa9\xd2\xa6\x62\xa1\x40\xb6\xc0\xc2\x49\xa1\x47\xc4\x5f\xaa\xab\xa1\x40\xac\xf5\xc2\x49\xa1\x47\xa9\xc7\xaa\xab\xa1\x40\xa2\xe2\xa2\xcf\xa2\xd0\xb6\x7d\xc3\xf6");
 +#undef MP
 +}
 +
