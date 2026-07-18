@@ -41,3 +41,6 @@ translations/batches/*.tsv
 
 # 下載的打包工具
 .toolcache/
+
+# 全 VGA dump contact sheet(資產傾印,不公開)
+docs/img/bestiary/_all_dumps.png
