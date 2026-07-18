@@ -50,7 +50,7 @@ index af27f131..5516215a 100644
  
  	if (getGameType() != GType_PP && getGameType() != GType_FF) {
 diff --git a/engines/agos/agos.h b/engines/agos/agos.h
-index 6a8d2237..73e46865 100644
+index 6a8d2237..508b5d6f 100644
 --- a/engines/agos/agos.h
 +++ b/engines/agos/agos.h
 @@ -37,6 +37,7 @@
@@ -61,7 +61,7 @@ index 6a8d2237..73e46865 100644
  #include "agos/detection.h"
  
  /**
-@@ -386,6 +387,16 @@ protected:
+@@ -386,6 +387,17 @@ protected:
  	bool _pause;
  	bool _speech;
  	bool _subtitles;
@@ -74,11 +74,12 @@ index 6a8d2237..73e46865 100644
 +	int _chtBufSlot = 0;
 +	bool _chtHires = false;   // 640x400 dual-layer 高解析畫布(沿用 PC98 機制)
 +	byte _chtLead = 0;        // windowPutChar Big5 雙位元組狀態
++	bool _chtMapOn = false;   // 動態地圖顯示中(現代玩家友善化，TAB 切換)
 +
  	bool _vgaVar9;
  	int16 _chanceModifier;
  	bool _restoreWindow6;
-@@ -958,6 +969,11 @@ protected:
+@@ -958,6 +970,14 @@ protected:
  	void renderStringAmiga(uint vgaSpriteId, uint color, uint width, uint height, const char *txt);
  	void renderString(uint vgaSpriteId, uint color, uint width, uint height, const char *txt);
  
@@ -86,15 +87,18 @@ index 6a8d2237..73e46865 100644
 +	void chtDrawBig5OnSurface(WindowBlock *window, uint x, uint y, byte lead, byte trail);
 +	byte chtReadableColor(byte idx);   // 亮度守門:只救暗到讀不到的字色
 +	byte chtOutlineColor();            // 描邊用最暗的非 0 索引
++	void chtDrawMap();                 // 動態地圖(現代玩家友善化)
++	void chtDrawMapLabel(int x, int y, const char *big5);  // 地圖用 16px 中文標籤
++	bool chtRoomHasTreasure(uint16 roomId);
 +
  	void writeChar(WindowBlock *window, int x, int y, int offs, int val);
  
  	byte *allocBlock(uint32 size);
 diff --git a/engines/agos/charset-fontdata.cpp b/engines/agos/charset-fontdata.cpp
-index 193986e3..80ccea55 100644
+index 193986e3..b0c3afef 100644
 --- a/engines/agos/charset-fontdata.cpp
 +++ b/engines/agos/charset-fontdata.cpp
-@@ -2914,6 +2914,102 @@ static const byte english_pnFont[] = {
+@@ -2914,6 +2914,238 @@ static const byte english_pnFont[] = {
  	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
  };
  
@@ -192,6 +196,142 @@ index 193986e3..80ccea55 100644
 +	}
 +	Common::Rect dirty(x, oy, x + fw, oy + fh);
 +	updateBackendSurface(&dirty);
++}
++
++// ===== 非上游: 現代玩家友善化 — 動態自動地圖(WW) =====
++// 從當前房間 BFS 走 N/E/S/W 出口佈 2D 座標, 畫格+牆(roomExitStates)+當前位置+寶物標記,
++// 畫進 hi-res _scaleBuf 疊層。TAB 切換。怪物固定放置(見 docs/DYNAMIC_MAP_FEASIBILITY.md)。
++bool AGOSEngine::chtRoomHasTreasure(uint16 roomId) {
++	Item *room = derefItem(roomId);
++	if (!room)
++		return false;
++	uint16 cid = room->child;
++	int guard = 0;
++	while (cid && guard++ < 200) {
++		Item *c = derefItem(cid);
++		if (!c)
++			break;
++		SubObject *so = (SubObject *)findChildOfType(c, kObjectType);
++		if (so && (so->objectFlags & kOFIcon))
++			return true;
++		cid = c->next;
++	}
++	return false;
++}
++
++void AGOSEngine::chtDrawMapLabel(int x, int y, const char *big5) {
++	if (!_scaleBuf || !_cht.font16)
++		return;
++	const byte *s = (const byte *)big5;
++	int cx = x, fw = _cht.fontW16, fh = _cht.fontH16, bpr = _cht.fontBpr16;
++	byte tc = chtReadableColor(15);
++	byte *hp = (byte *)_scaleBuf->getPixels();
++	uint pitch = _scaleBuf->pitch;
++	while (*s) {
++		if (chtIsBig5Lead(*s) && s[1]) {
++			const byte *g = _cht.glyph16(s[0], s[1]);
++			s += 2;
++			if (g) {
++				for (int row = 0; row < fh; row++) {
++					int yy = y + row;
++					if (yy < 0 || yy >= _scaleBuf->h) continue;
++					const byte *gr = g + row * bpr;
++					byte *d = hp + yy * pitch + cx;
++					for (int col = 0; col < fw; col++) {
++						if (cx + col < 0 || cx + col >= _scaleBuf->w) break;
++						if (gr[col >> 3] & (0x80 >> (col & 7))) d[col] = tc;
++					}
++				}
++			}
++			cx += fw;
++		} else {
++			s++;
++		}
++	}
++}
++
++void AGOSEngine::chtDrawMap() {
++	if (!_chtHires || !_scaleBuf || getGameType() != GType_WW)
++		return;
++	const int MAXR = 300;
++	uint16 ids[MAXR]; int cxr[MAXR], cyr[MAXR];
++	int n = 0, head = 0;
++	ids[0] = _currentRoom; cxr[0] = 0; cyr[0] = 0; n = 1;
++	static const int ddx[4] = {0, 1, 0, -1}, ddy[4] = {-1, 0, 1, 0};   // 0北 1東 2南 3西
++	while (head < n) {
++		uint16 rid = ids[head]; int rx = cxr[head], ry = cyr[head]; head++;
++		Item *room = derefItem(rid);
++		if (!room) continue;
++		for (int d = 0; d < 4; d++) {
++			if (getDoorState(room, d) == 0) continue;   // 牆
++			uint16 ex = getExitOf(room, d);
++			if (ex == 0) continue;
++			bool have = false;
++			for (int k = 0; k < n; k++) if (ids[k] == ex) { have = true; break; }
++			if (have || n >= MAXR) continue;
++			ids[n] = ex; cxr[n] = rx + ddx[d]; cyr[n] = ry + ddy[d]; n++;
++		}
++	}
++	int minx = 0, maxx = 0, miny = 0, maxy = 0;
++	for (int k = 0; k < n; k++) {
++		if (cxr[k] < minx) minx = cxr[k]; if (cxr[k] > maxx) maxx = cxr[k];
++		if (cyr[k] < miny) miny = cyr[k]; if (cyr[k] > maxy) maxy = cyr[k];
++	}
++	int cols = maxx - minx + 1, rows = maxy - miny + 1;
++	int panelX = 40, panelY = 56, panelW = 560, panelH = 300;
++	int cell = panelW / (cols > 0 ? cols : 1);
++	int cellv = panelH / (rows > 0 ? rows : 1);
++	if (cellv < cell) cell = cellv;
++	if (cell > 26) cell = 26;
++	if (cell < 7) cell = 7;
++	int gridW = cols * cell, gridH = rows * cell;
++	int ox = panelX + (panelW - gridW) / 2, oy = panelY + (panelH - gridH) / 2;
++
++	byte *hp = (byte *)_scaleBuf->getPixels();
++	uint pitch = _scaleBuf->pitch;
++	byte dark = chtOutlineColor();
++	byte wallc = chtReadableColor(15);
++	// 找一個「暖色/金色」索引標寶物(高 R+G 低 B); 找不到就退回 wallc
++	byte gold = wallc; { int best = -1; const byte *p = _currentPalette;
++		for (int i = 1; i < 256; i++) { int r = p[i*3], g = p[i*3+1], b = p[i*3+2];
++			if (r > 150 && g > 110 && b < 100) { int sc = r + g - b; if (sc > best) { best = sc; gold = (byte)i; } } } }
++
++#define MP(X, Y, C) do { int _x=(X), _y=(Y); if (_x>=0 && _x<_scaleBuf->w && _y>=0 && _y<_scaleBuf->h) hp[_y*pitch+_x]=(C); } while(0)
++	// 背景板
++	for (int yy = panelY - 28; yy < panelY + panelH + 8; yy++) {
++		if (yy < 0 || yy >= _scaleBuf->h) continue;
++		for (int xx = panelX - 18; xx < panelX + panelW + 18; xx++) MP(xx, yy, dark);
++	}
++	chtDrawMapLabel(panelX - 10, panelY - 26, "\xa6\x61\xb9\xcf");   // 地圖
++
++	for (int k = 0; k < n; k++) {
++		int gx = ox + (cxr[k] - minx) * cell;
++		int gy = oy + (cyr[k] - miny) * cell;
++		Item *room = derefItem(ids[k]);
++		if (!room) continue;
++		bool cur = (ids[k] == _currentRoom);
++		if (cur) {   // 當前房間: 內部填亮色
++			for (int yy = gy + 2; yy < gy + cell - 2; yy++)
++				for (int xx = gx + 2; xx < gx + cell - 2; xx++) MP(xx, yy, wallc);
++		}
++		for (int d = 0; d < 4; d++) {   // 牆: door==0 畫線
++			bool wall = (getDoorState(room, d) == 0);
++			if (!wall) continue;
++			if (d == 0) for (int xx = gx; xx < gx + cell; xx++) MP(xx, gy, wallc);
++			if (d == 2) for (int xx = gx; xx < gx + cell; xx++) MP(xx, gy + cell - 1, wallc);
++			if (d == 3) for (int yy = gy; yy < gy + cell; yy++) MP(gx, yy, wallc);
++			if (d == 1) for (int yy = gy; yy < gy + cell; yy++) MP(gx + cell - 1, yy, wallc);
++		}
++		if (!cur && chtRoomHasTreasure(ids[k])) {   // 寶物: 中心金色方塊
++			int cxp = gx + cell / 2, cyp = gy + cell / 2;
++			for (int yy = cyp - 1; yy <= cyp + 1; yy++)
++				for (int xx = cxp - 1; xx <= cxp + 1; xx++) MP(xx, yy, gold);
++		}
++	}
++	// 圖例: 白格：你所在　黃點：寶物　　ＴＡＢ開關地圖
++	chtDrawMapLabel(panelX - 10, panelY + panelH - 6,
++		"\xa5\xd5\xae\xe6\xa1\x47\xa7\x41\xa9\xd2\xa6\x62\xa1\x40\xb6\xc0\xc2\x49\xa1\x47\xc4\x5f\xaa\xab\xa1\x40\xa1\x40\xa2\xe2\xa2\xcf\xa2\xd0\xb6\x7d\xc3\xf6\xa6\x61\xb9\xcf");
++#undef MP
 +}
 +
  void AGOSEngine::windowDrawChar(WindowBlock *window, uint x, uint y, byte chr) {
@@ -480,6 +620,42 @@ index 3cb73123..193d8e4e 100644
  			// Simple 2x upscaling for the cursor in dual layer hi-res mode.
  			uint8 ptch = 16;
  			uint16 *dst1 = &((uint16*)_mouseData)[16 * 16 * 2 - 1];
+diff --git a/engines/agos/draw.cpp b/engines/agos/draw.cpp
+index 944797f9..b437b64f 100644
+--- a/engines/agos/draw.cpp
++++ b/engines/agos/draw.cpp
+@@ -840,6 +840,9 @@ void AGOSEngine::displayScreen() {
+ 		}
+ 	}
+ 
++	if (_chtMapOn)
++		chtDrawMap();   // 非上游: 動態地圖每幀重繪(覆蓋 clearWindow 對疊層的抹除)
++
+ 	updateBackendSurface();
+ 
+ 	if (getGameType() == GType_FF && _scrollFlag) {
+diff --git a/engines/agos/event.cpp b/engines/agos/event.cpp
+index db3ba144..e7133af0 100644
+--- a/engines/agos/event.cpp
++++ b/engines/agos/event.cpp
+@@ -512,6 +512,17 @@ void AGOSEngine::delay(uint amount) {
+ 						_variableArray[41] = 1;
+ 				}
+ 
++				// 非上游: TAB 切換動態地圖(WW 現代玩家友善化)。
++				if (_chtActive && getGameType() == GType_WW && event.kbd.keycode == Common::KEYCODE_TAB) {
++					_chtMapOn = !_chtMapOn;
++					if (_chtMapOn) {
++						chtDrawMap();
++					} else if (_scaleBuf) {
++						memset(_scaleBuf->getPixels(), 0, _scaleBuf->pitch * _scaleBuf->h);
++					}
++					updateBackendSurface(nullptr);
++				}
++
+ 				_keyPressed = event.kbd;
+ 				break;
+ 			case Common::EVENT_MOUSEMOVE:
 diff --git a/engines/agos/gfx.cpp b/engines/agos/gfx.cpp
 index 06dfaef6..d9732f4a 100644
 --- a/engines/agos/gfx.cpp
