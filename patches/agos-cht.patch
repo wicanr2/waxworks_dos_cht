@@ -97,10 +97,10 @@ index 6a8d2237..7b18195f 100644
  
  	byte *allocBlock(uint32 size);
 diff --git a/engines/agos/charset-fontdata.cpp b/engines/agos/charset-fontdata.cpp
-index 193986e3..30db1159 100644
+index 193986e3..511f336f 100644
 --- a/engines/agos/charset-fontdata.cpp
 +++ b/engines/agos/charset-fontdata.cpp
-@@ -2914,6 +2914,271 @@ static const byte english_pnFont[] = {
+@@ -2914,6 +2914,273 @@ static const byte english_pnFont[] = {
  	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
  };
  
@@ -363,9 +363,11 @@ index 193986e3..30db1159 100644
 +			}
 +		}
 +	}
-+	// 圖例: 白格：你所在　黃點：寶物　紅點：怪物　ＴＡＢ開關
-+	chtDrawMapLabel(panelX - 10, panelY + panelH - 6,
++	// 圖例(兩行): 白格：你所在　黃點：寶物　紅點：怪物　ＴＡＢ開關 / Ｆ５回復生命　Ｆ７無敵模式
++	chtDrawMapLabel(panelX - 10, panelY + panelH - 20,
 +		"\xa5\xd5\xae\xe6\xa1\x47\xa7\x41\xa9\xd2\xa6\x62\xa1\x40\xb6\xc0\xc2\x49\xa1\x47\xc4\x5f\xaa\xab\xa1\x40\xac\xf5\xc2\x49\xa1\x47\xa9\xc7\xaa\xab\xa1\x40\xa2\xe2\xa2\xcf\xa2\xd0\xb6\x7d\xc3\xf6");
++	chtDrawMapLabel(panelX - 10, panelY + panelH - 2,
++		"\xa2\xd4\xa2\xb4\xa6\x5e\xb4\x5f\xa5\xcd\xa9\x52\xa1\x40\xa2\xd4\xa2\xb6\xb5\x4c\xbc\xc4\xbc\xd2\xa6\xa1");
 +#undef MP
 +}
 +
