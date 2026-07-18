@@ -1,0 +1,43 @@
+# === 遊戲原檔 / 版權素材：絕不入公開 repo（patch-only 硬規則）===
+original_game_floppy/
+run_game/
+*.VGA
+GAMEPC
+STRIPPED.TXT
+TABLES*
+TEXT*
+ROOMS*
+XTABLE*
+*.MUS
+*.DRV
+*.FXB
+MENUS.DAT
+ICON.DAT
+STATELST
+ROOMSLST
+TBLLIST
+XTBLLIST
+FREEMEM.SIZ
+START
+*.zip
+Waxworks*.zip
+
+# === ROM（MT-32）===
+*.ROM
+
+# === 建置產物 / 大檔 ===
+build/scummvm-src/
+dist-all/
+screenshots/
+*.mp4
+*.gif
+
+# === 抽出的英文原文（衍生自版權遊戲，不入庫）===
+strings/waxworks_text.tsv
+translations/batches/*.tsv
+
+# 字型二進位（衍生自 GPL Noto，可留；但點陣檔大，選擇性）
+# fonts/*.dcjk
+
+# 下載的打包工具
+.toolcache/

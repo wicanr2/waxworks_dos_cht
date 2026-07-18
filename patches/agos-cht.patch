@@ -1,0 +1,587 @@
+diff --git a/engines/agos/agos.cpp b/engines/agos/agos.cpp
+index af27f131..5516215a 100644
+--- a/engines/agos/agos.cpp
++++ b/engines/agos/agos.cpp
+@@ -607,6 +607,15 @@ Common::Error AGOSEngine::init() {
+ 		_internalHeight <<= 1;
+ 	}
+ 
++	// 非上游: Waxworks 繁中 — 若 CHT 字模在場, 啟用 640x400 dual-layer 高解析畫布
++	// (沿用 PC98 的 _backBuf(邏輯 320x200)+ _scaleBuf(640x400 高解析疊層)機制),
++	// 中文字以原生點陣畫在放大後的畫布上, 相對變小、清晰不擠 (rulebook 81/84)。
++	if (getGameType() == GType_WW && Common::File::exists("waxworks_zh16.dcjk")) {
++		_chtHires = true;
++		_internalWidth = _screenWidth << 1;    // 640
++		_internalHeight = _screenHeight << 1;  // 400
++	}
++
+ 	if (ConfMan.hasKey("disable_fade_effects"))
+ 		_neverFade = ConfMan.getBool("disable_fade_effects");
+ 
+@@ -648,7 +657,7 @@ Common::Error AGOSEngine::init() {
+ 	_backGroundBuf = new Graphics::Surface();
+ 	_backGroundBuf->create(_screenWidth, _screenHeight, Graphics::PixelFormat::createFormatCLUT8());
+ 
+-	if (getGameType() == GType_FF || getGameType() == GType_PP || (getGameType() == GType_ELVIRA1 && getPlatform() == Common::kPlatformPC98)) {
++	if (getGameType() == GType_FF || getGameType() == GType_PP || (getGameType() == GType_ELVIRA1 && getPlatform() == Common::kPlatformPC98) || _chtHires) {
+ 		_backBuf = new Graphics::Surface();
+ 		_backBuf->create(_screenWidth, _screenHeight, Graphics::PixelFormat::createFormatCLUT8());
+ 		_scaleBuf = new Graphics::Surface();
+@@ -1061,6 +1070,21 @@ Common::Error AGOSEngine::go() {
+ 		loadMenuFile();
+ 	}
+ 
++	// 非上游: Waxworks 繁體中文載入 (字型 + 譯表)
++	_chtActive = false;
++	_chtSubLang = 1;
++	_chtBufSlot = 0;
++	if (getGameType() == GType_WW) {
++		bool fontOk = chtLoadFont16(_cht, "waxworks_zh16.dcjk");   // 16x16 視窗文字主字型
++		chtLoadFont(_cht, "waxworks_zh24.dcjk");                    // 24x24 (可選, 大字用)
++		bool tabOk = chtLoadTable(_cht, "waxworks_zh.tab");
++		if (fontOk && tabOk) {
++			_chtActive = true;
++			_copyProtection = false;   // 繁中版強制 bypass 防拷 (o_process id==71 自動跳過)
++			debug(0, "CHT: Waxworks 繁中模式 ON (font16 + table ready, hires=%d)", (int)_chtHires);
++		}
++	}
++
+ 	vc34_setMouseOff();
+ 
+ 	if (getGameType() != GType_PP && getGameType() != GType_FF) {
+diff --git a/engines/agos/agos.h b/engines/agos/agos.h
+index 6a8d2237..73e46865 100644
+--- a/engines/agos/agos.h
++++ b/engines/agos/agos.h
+@@ -37,6 +37,7 @@
+ #include "backends/keymapper/keymapper.h"
+ 
+ #include "agos/vga.h"
++#include "agos/cht_fusion.h"
+ #include "agos/detection.h"
+ 
+ /**
+@@ -386,6 +387,16 @@ protected:
+ 	bool _pause;
+ 	bool _speech;
+ 	bool _subtitles;
++
++	// 繁中化 (非上游) — Waxworks (GType_WW) AGOS 繁體中文
++	ChtFusion _cht;
++	int _chtSubLang = 1;      // 0=英文(原生), 1=中文
++	bool _chtActive = false;  // 繁中模式啟用(字型+譯表就緒)
++	byte _chtBuf[2][1024];    // getStringPtrByID 回傳的 Big5 雙 buffer
++	int _chtBufSlot = 0;
++	bool _chtHires = false;   // 640x400 dual-layer 高解析畫布(沿用 PC98 機制)
++	byte _chtLead = 0;        // windowPutChar Big5 雙位元組狀態
++
+ 	bool _vgaVar9;
+ 	int16 _chanceModifier;
+ 	bool _restoreWindow6;
+@@ -958,6 +969,11 @@ protected:
+ 	void renderStringAmiga(uint vgaSpriteId, uint color, uint width, uint height, const char *txt);
+ 	void renderString(uint vgaSpriteId, uint color, uint width, uint height, const char *txt);
+ 
++	// 繁中化 (非上游): 把一個 Big5 字直接繪到 window 的 backend/hires surface
++	void chtDrawBig5OnSurface(WindowBlock *window, uint x, uint y, byte lead, byte trail);
++	byte chtReadableColor(byte idx);   // 亮度守門:只救暗到讀不到的字色
++	byte chtOutlineColor();            // 描邊用最暗的非 0 索引
++
+ 	void writeChar(WindowBlock *window, int x, int y, int offs, int val);
+ 
+ 	byte *allocBlock(uint32 size);
+diff --git a/engines/agos/charset-fontdata.cpp b/engines/agos/charset-fontdata.cpp
+index 193986e3..80ccea55 100644
+--- a/engines/agos/charset-fontdata.cpp
++++ b/engines/agos/charset-fontdata.cpp
+@@ -2914,6 +2914,102 @@ static const byte english_pnFont[] = {
+ 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+ };
+ 
++// ===== 非上游: Waxworks 繁體中文繪字 (Big5 → hires _scaleBuf) =====
++// 亮度守門: 只救「暗到讀不到」的字色, 其餘保留原本 window 配色。
++// BT.601 luma (_currentPalette 0–255), Y < 90 視為太暗。
++#define CHT_LUMA(p, i) ((299 * (p)[(i) * 3] + 587 * (p)[(i) * 3 + 1] + 114 * (p)[(i) * 3 + 2]) / 1000)
++
++byte AGOSEngine::chtReadableColor(byte idx) {
++	const byte *p = _currentPalette;
++	if (idx != 0 && CHT_LUMA(p, idx) >= 90)
++		return idx;                      // 夠亮 → 原色不動
++	int best = -1, brightest = -1, brightestY = -1;
++	for (int i = 1; i < 256; i++) {      // 跳過 0(_scaleBuf 疊層透明哨兵)
++		int yv = CHT_LUMA(p, i);
++		if (yv > brightestY) { brightestY = yv; brightest = i; }
++		if (yv >= 90 && best < 0) best = i;
++	}
++	if (best > 0)
++		return (byte)best;
++	return (byte)(brightest > 0 ? brightest : 15);
++}
++
++// 描邊色: 調色盤中最暗的「非 0」索引 (0 是疊層透明哨兵, 不能拿來描邊)。
++byte AGOSEngine::chtOutlineColor() {
++	const byte *p = _currentPalette;
++	int best = 1, bestY = 1 << 30;
++	for (int i = 1; i < 256; i++) {
++		int yv = CHT_LUMA(p, i);
++		if (yv < bestY) { bestY = yv; best = i; }
++	}
++	return (byte)best;
++}
++
++// 把一個 Big5 字繪到 window 的 backend/hires surface。
++// hires: 用 16px 字模畫進 640x400 _scaleBuf 高解析疊層 (2x 座標, 16px=1 邏輯 8px 欄, 平鋪不重疊),
++//        帶 1px 描邊 → 壓在任意美術上都有輪廓。
++void AGOSEngine::chtDrawBig5OnSurface(WindowBlock *window, uint x, uint y, byte lead, byte trail) {
++	const byte *g = _cht.glyph16(lead, trail);
++	if (!g)
++		return;
++	const int fw = _cht.fontW16, fh = _cht.fontH16, bpr = _cht.fontBpr16;
++	byte tc = chtReadableColor((byte)(window->textColor ? window->textColor : 15));
++
++	if (_chtHires && _scaleBuf) {
++		byte ol = chtOutlineColor();
++		int bx = (int)x * 2, by = (int)y * 2;
++		byte *hp = (byte *)_scaleBuf->getPixels();
++		uint hpitch = _scaleBuf->pitch;
++		// pass 0: 描邊 (筆畫 8 鄰域塗最暗色); pass 1: 蓋本體字色
++		for (int pass = 0; pass < 2; pass++) {
++			for (int row = 0; row < fh; row++) {
++				const byte *gr = g + row * bpr;
++				for (int col = 0; col < fw; col++) {
++					if (!(gr[col >> 3] & (0x80 >> (col & 7))))
++						continue;
++					int xx = bx + col, yy = by + row;
++					if (pass == 0) {
++						for (int dy = -1; dy <= 1; dy++)
++							for (int dx = -1; dx <= 1; dx++) {
++								int ox = xx + dx, oy = yy + dy;
++								if (ox < 0 || ox >= _scaleBuf->w || oy < 0 || oy >= _scaleBuf->h)
++									continue;
++								hp[oy * hpitch + ox] = ol;
++							}
++					} else {
++						if (xx < 0 || xx >= _scaleBuf->w || yy < 0 || yy >= _scaleBuf->h)
++							continue;
++						hp[yy * hpitch + xx] = tc;
++					}
++				}
++			}
++		}
++		Common::Rect dirty(x, y, x + fw, y + fh);
++		updateBackendSurface(&dirty);
++		return;
++	}
++
++	// 非 hires fallback: 16px 字直繪 backend surface
++	Graphics::Surface *screen = getBackendSurface();
++	byte *sp = (byte *)screen->getPixels();
++	uint pitch = screen->pitch;
++	int oy = (int)y - (fh - 8);
++	if (oy < 0) oy = 0;
++	for (int row = 0; row < fh; row++) {
++		int yy = oy + row;
++		if (yy < 0 || yy >= screen->h) continue;
++		const byte *gr = g + row * bpr;
++		byte *d = sp + yy * pitch + x;
++		for (int col = 0; col < fw; col++) {
++			if ((int)x + col >= screen->w) break;
++			if (gr[col >> 3] & (0x80 >> (col & 7)))
++				d[col] = tc;
++		}
++	}
++	Common::Rect dirty(x, oy, x + fw, oy + fh);
++	updateBackendSurface(&dirty);
++}
++
+ void AGOSEngine::windowDrawChar(WindowBlock *window, uint x, uint y, byte chr) {
+ 	const byte *src;
+ 	byte color, *dst;
+diff --git a/engines/agos/charset.cpp b/engines/agos/charset.cpp
+index 05451427..43a7c76f 100644
+--- a/engines/agos/charset.cpp
++++ b/engines/agos/charset.cpp
+@@ -147,8 +147,9 @@ void AGOSEngine::justifyOutPut(byte chr) {
+ 		_printCharPixelCount = 0;
+ 		doOutput(&chr, 1);
+ 		clsCheck(_textWindow);
+-	} else if (getLanguage() == Common::JA_JPN && !_forceAscii) {
+-		// Japanese has no word wrapping
++	} else if ((getLanguage() == Common::JA_JPN && !_forceAscii) ||
++			   (_chtActive && _chtSubLang == 1 && getGameType() == GType_WW)) {
++		// Japanese / 繁中: 無 word wrapping — 逐字即出, 換行交給 windowPutChar (依 window->width 折)
+ 		_lettersToPrintBuf[0] = chr;
+ 		_lettersToPrintBuf[1] = '\0';
+ 		doOutput(_lettersToPrintBuf, 1);
+@@ -221,6 +222,32 @@ void AGOSEngine::windowPutChar(WindowBlock *window, byte c, byte b) {
+ 	byte width = 6;
+ 	byte textColumnWidth = 8;
+ 
++	// 非上游: Waxworks Big5 雙位元組視窗文字 (對白/敘述/物件名/box)
++	// 一個 CJK 字 = 一個邏輯 8px 欄 (hires 疊層上 16px, 平鋪不重疊);
++	// 折行以 window->width(欄數) 為準, 不靠 textMaxLength (box 的 textMaxLength 是 ASCII 字數, 對 CJK 不準)。
++	if (_chtActive && _chtSubLang == 1 && getGameType() == GType_WW) {
++		if (_chtLead != 0) {
++			byte lead = _chtLead;
++			_chtLead = 0;
++			if (window->textColumn >= window->width) {
++				windowNewLine(window);
++				if (window->textRow == window->height)
++					window->textRow--;
++			}
++			uint px = window->x * 8 + window->textColumn * 8;
++			uint py = window->textRow * 8 + window->y;
++			chtDrawBig5OnSurface(window, px, py, lead, c);
++			window->textColumn += 1;
++			window->textLength += 1;
++			return;
++		}
++		if (chtIsBig5Lead(c)) {
++			_chtLead = c;
++			return;
++		}
++		// 半形字 (數字/標點) 落到下方原生 ASCII 路徑
++	}
++
+ 	if (c == 12) {
+ 		clearWindow(window);
+ 	} else if (c == 13 || c == 10) {
+@@ -388,6 +415,19 @@ void AGOSEngine::windowScroll(WindowBlock *window) {
+ 			} while (--h1);
+ 		}
+ 
++		// 非上游: hires — 把 _scaleBuf 疊層的中文往上捲一整行(16 _scaleBuf px = 8 邏輯 px),
++		// 用 _scaleBuf 自己的 pitch(640) 才正確; 底部空出的一行清 0(透明), 待新句重繪。
++		if (_chtHires && _scaleBuf) {
++			uint sp2 = _scaleBuf->pitch;
++			int cw = window->width * 16;
++			int ch = (window->height - 1) * 16;
++			byte *d = (byte *)_scaleBuf->getBasePtr(window->x * 16, window->y * 2);
++			byte *s = d + 16 * sp2;
++			for (int r = 0; r < ch; r++) { memmove(d, s, cw); d += sp2; s += sp2; }
++			byte *bot = (byte *)_scaleBuf->getBasePtr(window->x * 16, (window->y + (window->height - 1) * 8) * 2);
++			for (int r = 0; r < 16; r++) { memset(bot, 0, cw); bot += sp2; }
++		}
++
+ 		Common::Rect dirtyRect(window->x * 8, window->y, window->x * 8 + w2, window->y + h2);
+ 		updateBackendSurface(&dirtyRect);
+ 	}
+diff --git a/engines/agos/cht_fusion.cpp b/engines/agos/cht_fusion.cpp
+new file mode 100644
+index 00000000..337389c3
+--- /dev/null
++++ b/engines/agos/cht_fusion.cpp
+@@ -0,0 +1,101 @@
++/* Simon 繁中融合 — 載入器 (非上游) */
++#include "agos/cht_fusion.h"
++#include "common/file.h"
++#include "common/debug.h"
++
++namespace AGOS {
++
++// 載入 DCJK 字型檔到 fus.font
++bool chtLoadFont(ChtFusion &fus, const char *filename) {
++	Common::File f;
++	if (!f.open(filename))
++		return false;
++	byte hdr[15];
++	if (f.read(hdr, 15) != 15)
++		return false;
++	if (memcmp(hdr, "DCJK", 4) != 0)
++		return false;
++	fus.fontW = hdr[5];
++	fus.fontH = hdr[6];
++	fus.fontBpr = hdr[7];
++	fus.numGlyphs = READ_LE_UINT32(hdr + 11);
++	uint32 dataSize = fus.numGlyphs * fus.fontBpr * fus.fontH;
++	fus.font = (byte *)malloc(dataSize);
++	if (!fus.font)
++		return false;
++	if (f.read(fus.font, dataSize) != dataSize) {
++		free(fus.font);
++		fus.font = nullptr;
++		return false;
++	}
++	debug(0, "CHT: font %s loaded (%dx%d, %u glyphs)", filename, fus.fontW, fus.fontH, fus.numGlyphs);
++	return true;
++}
++
++// 載入 16x16 DCJK 小字型到 fus.font16 (指令面板用)
++bool chtLoadFont16(ChtFusion &fus, const char *filename) {
++	Common::File f;
++	if (!f.open(filename))
++		return false;
++	byte hdr[15];
++	if (f.read(hdr, 15) != 15)
++		return false;
++	if (memcmp(hdr, "DCJK", 4) != 0)
++		return false;
++	fus.fontW16 = hdr[5];
++	fus.fontH16 = hdr[6];
++	fus.fontBpr16 = hdr[7];
++	fus.numGlyphs16 = READ_LE_UINT32(hdr + 11);
++	uint32 dataSize = fus.numGlyphs16 * fus.fontBpr16 * fus.fontH16;
++	fus.font16 = (byte *)malloc(dataSize);
++	if (!fus.font16)
++		return false;
++	if (f.read(fus.font16, dataSize) != dataSize) {
++		free(fus.font16);
++		fus.font16 = nullptr;
++		return false;
++	}
++	debug(0, "CHT: panel font %s loaded (%dx%d, %u glyphs)", filename, fus.fontW16, fus.fontH16, fus.numGlyphs16);
++	return true;
++}
++
++// 載入譯表 simon_zh.tab (STAB: magic, count, [id:4][len:2][big5..])
++bool chtLoadTable(ChtFusion &fus, const char *filename) {
++	Common::File f;
++	if (!f.open(filename))
++		return false;
++	byte magic[4];
++	if (f.read(magic, 4) != 4 || memcmp(magic, "STAB", 4) != 0)
++		return false;
++	uint32 count = f.readUint32LE();
++	for (uint32 i = 0; i < count; i++) {
++		uint32 id = f.readUint32LE();
++		uint16 len = f.readUint16LE();
++		Common::String s;
++		for (uint16 k = 0; k < len; k++)
++			s += (char)f.readByte();
++		fus.table[id] = s;
++	}
++	debug(0, "CHT: translation table %s loaded (%u entries)", filename, count);
++	return true;
++}
++
++// 載入語音對映 simon_voice.map (VMAP: magic, count, [id:4][speech:2])
++bool chtLoadVoiceMap(ChtFusion &fus, const char *filename) {
++	Common::File f;
++	if (!f.open(filename))
++		return false;
++	byte magic[4];
++	if (f.read(magic, 4) != 4 || memcmp(magic, "VMAP", 4) != 0)
++		return false;
++	uint32 count = f.readUint32LE();
++	for (uint32 i = 0; i < count; i++) {
++		uint32 id = f.readUint32LE();
++		uint16 sp = f.readUint16LE();
++		fus.voice[id] = sp;
++	}
++	debug(0, "CHT: voice map %s loaded (%u entries)", filename, count);
++	return true;
++}
++
++} // namespace AGOS
+diff --git a/engines/agos/cht_fusion.h b/engines/agos/cht_fusion.h
+new file mode 100644
+index 00000000..d862d078
+--- /dev/null
++++ b/engines/agos/cht_fusion.h
+@@ -0,0 +1,71 @@
++/* Simon the Sorcerer 繁體中文化 (CD 語音 + floppy 完整字幕 融合) — 非上游模組。
++ * 資料: simon_zh24.dcjk (Big5 24x24 點陣), simon_zh.tab (id→Big5 譯表),
++ *       simon_voice.map (floppy stringId→CD speechId 語音對映)。
++ */
++#ifndef AGOS_CHT_FUSION_H
++#define AGOS_CHT_FUSION_H
++
++#include "common/scummsys.h"
++#include "common/hashmap.h"
++#include "common/str.h"
++
++namespace AGOS {
++
++// Big5 線性索引 (與 build_cjk_font.py 對齊): (lead-0x81)*157 + trailOffset
++inline bool chtIsBig5Lead(byte c) { return c >= 0x81 && c <= 0xFE; }
++
++inline int chtBig5Index(byte lead, byte trail) {
++	if (lead < 0x81 || lead > 0xFE)
++		return -1;
++	int to;
++	if (trail >= 0x40 && trail <= 0x7E)
++		to = trail - 0x40;
++	else if (trail >= 0xA1 && trail <= 0xFE)
++		to = 63 + (trail - 0xA1);
++	else
++		return -1;
++	return (lead - 0x81) * 157 + to;
++}
++
++struct ChtFusion {
++	// 字型 (24x24, 字幕/視窗文字用)
++	byte *font = nullptr;      // DCJK glyph 區起點 (跳過 15-byte header)
++	int fontW = 0, fontH = 0, fontBpr = 0;
++	uint32 numGlyphs = 0;
++	// 小字型 (16x16, 底部指令面板小格用)
++	byte *font16 = nullptr;
++	int fontW16 = 0, fontH16 = 0, fontBpr16 = 0;
++	uint32 numGlyphs16 = 0;
++	// 譯表: floppy stringId -> Big5 字串
++	Common::HashMap<uint32, Common::String> table;
++	// 語音: floppy stringId -> CD speechId
++	Common::HashMap<uint32, uint16> voice;
++
++	bool fontLoaded() const { return font != nullptr; }
++	bool hasTable() const { return !table.empty(); }
++
++	// 取得某 Big5 字的 glyph bitmap (fontBpr*fontH bytes), 找不到回 nullptr
++	const byte *glyph(byte lead, byte trail) const {
++		if (!font) return nullptr;
++		int idx = chtBig5Index(lead, trail);
++		if (idx < 0 || (uint32)idx >= numGlyphs) return nullptr;
++		return font + (uint32)idx * fontBpr * fontH;
++	}
++
++	// 16x16 小字模版本 (指令面板用)
++	const byte *glyph16(byte lead, byte trail) const {
++		if (!font16) return nullptr;
++		int idx = chtBig5Index(lead, trail);
++		if (idx < 0 || (uint32)idx >= numGlyphs16) return nullptr;
++		return font16 + (uint32)idx * fontBpr16 * fontH16;
++	}
++};
++
++bool chtLoadFont(ChtFusion &fus, const char *filename);
++bool chtLoadFont16(ChtFusion &fus, const char *filename);
++bool chtLoadTable(ChtFusion &fus, const char *filename);
++bool chtLoadVoiceMap(ChtFusion &fus, const char *filename);
++
++} // namespace AGOS
++
++#endif
+diff --git a/engines/agos/cursor.cpp b/engines/agos/cursor.cpp
+index 3cb73123..193d8e4e 100644
+--- a/engines/agos/cursor.cpp
++++ b/engines/agos/cursor.cpp
+@@ -546,6 +546,7 @@ void AGOSEngine::handleMouseMoved() {
+ 
+ 	CursorMan.showMouse(true);
+ 	_mouse = _eventMan->getMousePos();
++	if (_chtHires) { _mouse.x >>= 1; _mouse.y >>= 1; }   // 非上游: 640x400→320x200 還原給 hitarea
+ 
+ 	if (getGameType() == GType_WW) {
+ 		if (_variableArray[51] != 0 && _mouseCursor != _variableArray[51]) {
+@@ -788,7 +789,7 @@ void AGOSEngine::initMouse() {
+ 	_maxCursorWidth = 16;
+ 	_maxCursorHeight = 16;
+ 
+-	if (getGameId() == GID_ELVIRA1 && getPlatform() == Common::kPlatformPC98) {
++	if ((getGameId() == GID_ELVIRA1 && getPlatform() == Common::kPlatformPC98) || _chtHires) {
+ 		_maxCursorWidth <<= 1;
+ 		_maxCursorHeight <<= 1;
+ 	}
+@@ -873,7 +874,7 @@ void AGOSEngine::drawMousePointer() {
+ 			src += 2;
+ 		}
+ 
+-		if (getGameId() == GID_ELVIRA1 && getPlatform() == Common::kPlatformPC98) {
++		if ((getGameId() == GID_ELVIRA1 && getPlatform() == Common::kPlatformPC98) || _chtHires) {
+ 			// Simple 2x upscaling for the cursor in dual layer hi-res mode.
+ 			uint8 ptch = 16;
+ 			uint16 *dst1 = &((uint16*)_mouseData)[16 * 16 * 2 - 1];
+diff --git a/engines/agos/gfx.cpp b/engines/agos/gfx.cpp
+index 06dfaef6..d9732f4a 100644
+--- a/engines/agos/gfx.cpp
++++ b/engines/agos/gfx.cpp
+@@ -1035,11 +1035,11 @@ void AGOSEngine::verticalScroll(VC10_state *state) {
+ }
+ 
+ Graphics::Surface *AGOSEngine::getBackendSurface() const {
+-	return (getGameId() == GID_ELVIRA1 && getPlatform() == Common::kPlatformPC98) ? _backBuf : _system->lockScreen();
++	return ((getGameId() == GID_ELVIRA1 && getPlatform() == Common::kPlatformPC98) || _chtHires) ? _backBuf : _system->lockScreen();
+ }
+ 
+ void AGOSEngine::updateBackendSurface(Common::Rect *area) const {
+-	if (getGameId() == GID_ELVIRA1 && getPlatform() == Common::kPlatformPC98) {
++	if ((getGameId() == GID_ELVIRA1 && getPlatform() == Common::kPlatformPC98) || _chtHires) {
+ 		int x = 0;
+ 		int y = 0;
+ 		int w = _screenWidth;
+diff --git a/engines/agos/module.mk b/engines/agos/module.mk
+index 37432e1e..be4c4ce4 100644
+--- a/engines/agos/module.mk
++++ b/engines/agos/module.mk
+@@ -9,6 +9,7 @@ MODULE_OBJS := \
+ 	drivers/accolade/mt32.o \
+ 	drivers/simon1/adlib.o \
+ 	agos.o \
++	cht_fusion.o \
+ 	charset.o \
+ 	charset-fontdata.o \
+ 	contain.o \
+diff --git a/engines/agos/string.cpp b/engines/agos/string.cpp
+index 1aa590b8..14e735f2 100644
+--- a/engines/agos/string.cpp
++++ b/engines/agos/string.cpp
+@@ -135,6 +135,21 @@ const byte *AGOSEngine::getStringPtrByID(uint16 stringId, bool upperCase) {
+ 		Common::strlcpy((char *)dst, (const char *)stringPtr, 180);
+ 	}
+ 
++	// 非上游: Waxworks 繁中注入 — 依 stringId 換成 Big5 完整譯文。
++	// 提前 return, 避開下方 upperCase(toupper 會撞壞 Big5 lead byte)。
++	if (_chtActive && _chtSubLang == 1) {
++		Common::HashMap<uint32, Common::String>::const_iterator it = _cht.table.find(stringId);
++		if (it != _cht.table.end()) {
++			_chtBufSlot ^= 1;
++			byte *zb = _chtBuf[_chtBufSlot];
++			uint n = it->_value.size();
++			if (n > 1022) n = 1022;
++			memcpy(zb, it->_value.c_str(), n);
++			zb[n] = 0;
++			return zb;
++		}
++	}
++
+ 	// WORKAROUND bug #2780: The French version of Simon 1 and the
+ 	// Polish version of Simon 2 used excess spaces, at the end of many
+ 	// messages, so we strip off those excess spaces.
+@@ -861,6 +876,25 @@ void AGOSEngine_Feeble::sendInteractText(uint16 num, const char *fmt, ...) {
+ 
+ // Waxworks specific
+ uint16 AGOSEngine_Waxworks::getBoxSize() {
++	// 非上游: 繁中 — 依 CJK 顯示格數決定 box 大小, 不走 checkFit。
++	// checkFit 靠空白斷詞換行(ptr = 上個空白位置), 中文無空白 → ptr = nullptr → 解參考崩潰。
++	// 各 size 的每行格數 = 該 box 的 window width(見 printBox), CJK 一字 = 一格。
++	if (_chtActive && _chtSubLang == 1) {
++		static const int bw[6] = {20, 24, 28, 32, 36, 38};
++		for (int sz = 0; sz < 6; sz++) {
++			int rows = 1, col = 0;
++			for (const byte *p = (const byte *)_boxBuffer; *p; ) {
++				byte c = *p;
++				if (c == '\n') { rows++; col = 0; p++; continue; }
++				if (chtIsBig5Lead(c) && p[1]) p += 2; else p++;
++				if (++col >= bw[sz]) { rows++; col = 0; }
++			}
++			if (rows <= sz + 1)
++				return (uint16)(sz + 1);
++		}
++		return 6;
++	}
++
+ 	int x;
+ 	switch (_boxLineCount) {
+ 	case 1: x = _lineCounts[0];
+diff --git a/engines/agos/window.cpp b/engines/agos/window.cpp
+index 03835590..5a047983 100644
+--- a/engines/agos/window.cpp
++++ b/engines/agos/window.cpp
+@@ -109,6 +109,18 @@ void AGOSEngine::closeWindow(uint a) {
+ 
+ void AGOSEngine::clearWindow(WindowBlock *window) {
+ 	clearHiResTextLayer();
++	// 非上游: hires 清掉此 window 在 _scaleBuf 疊層的舊中文 (乾淨 2x 矩形 + clamp),
++	// 否則上一句對白/物件名會殘留 (0 = 疊層透明哨兵)。
++	if (_chtHires && _scaleBuf && window) {
++		int hx = window->x * 16, hw = window->width * 16;
++		int hy = window->y * 2, hh = window->height * 16;
++		if (hx < 0) hx = 0; if (hy < 0) hy = 0;
++		if (hx + hw > _scaleBuf->w) hw = _scaleBuf->w - hx;
++		if (hy + hh > _scaleBuf->h) hh = _scaleBuf->h - hy;
++		byte *hp = (byte *)_scaleBuf->getPixels();
++		for (int yy = 0; yy < hh; yy++)
++			memset(hp + (hy + yy) * _scaleBuf->pitch + hx, 0, hw > 0 ? hw : 0);
++	}
+ 	if (window->flags & 0x10)
+ 		restoreWindow(window);
+ 	else
