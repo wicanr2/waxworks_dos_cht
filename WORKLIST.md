@@ -22,7 +22,20 @@
 | AGOS 通用中文化模板 | ✅ | `docs/CLAUDE-AGOS.md` |
 | 公開 repo patch-only + leak-scan | ✅ | 已 push，無遊戲本體/版權素材 |
 
-## ⏳ 待辦（v2 / 剩餘）
+## ✅ v2 已完成（現代玩家友善化 + 文化保留，皆已 push）
+
+| 項目 | 證據 |
+|---|---|
+| 動態地圖（TAB）：牆/門/當前位置/BFS 佈局 | `chtDrawMap`；`docs/img/map.png` |
+| 地圖標記：黃點寶物 + 紅點怪物 | 怪物偵測 `objectFlags==kOFText`（dump 驗證）|
+| 地圖圖例兩行（含 F5/F7 熱鍵提示，可發現性）| `docs/img/map.png` |
+| 友善模式：F7 無敵（HP+心靈力保持滿）+ F5 回復 | `_variableArray[23]=HP、[22]=心靈力`；`docs/img/friendly_mode.png` |
+| 怪物圖鑑 + 9 隻原版 sprite | `docs/BESTIARY.md`；`docs/img/bestiary/*.png` |
+| README 熱血改寫「把勸退神作變可愛」 | `README.md` #roadmap |
+| verb 圖示條調查（定調＝烘進 VGA 影像 102）| 見下 v3 |
+| VGA sprite dump 工具 | `scripts/dump_vga.sh` |
+
+## ⏳ 待辦（v3 / 剩餘）
 
 | 項目 | 說明 | 難度/風險 |
 |---|---|---|
