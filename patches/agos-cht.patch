@@ -50,7 +50,7 @@ index af27f131..5516215a 100644
  
  	if (getGameType() != GType_PP && getGameType() != GType_FF) {
 diff --git a/engines/agos/agos.h b/engines/agos/agos.h
-index 6a8d2237..1a30ee6e 100644
+index 6a8d2237..7b18195f 100644
 --- a/engines/agos/agos.h
 +++ b/engines/agos/agos.h
 @@ -37,6 +37,7 @@
@@ -61,7 +61,7 @@ index 6a8d2237..1a30ee6e 100644
  #include "agos/detection.h"
  
  /**
-@@ -386,6 +387,17 @@ protected:
+@@ -386,6 +387,18 @@ protected:
  	bool _pause;
  	bool _speech;
  	bool _subtitles;
@@ -75,11 +75,12 @@ index 6a8d2237..1a30ee6e 100644
 +	bool _chtHires = false;   // 640x400 dual-layer 高解析畫布(沿用 PC98 機制)
 +	byte _chtLead = 0;        // windowPutChar Big5 雙位元組狀態
 +	bool _chtMapOn = false;   // 動態地圖顯示中(現代玩家友善化，TAB 切換)
++	bool _chtGodMode = false; // 友善/無敵模式(F7 切換，HP+心靈力保持滿)
 +
  	bool _vgaVar9;
  	int16 _chanceModifier;
  	bool _restoreWindow6;
-@@ -958,6 +970,15 @@ protected:
+@@ -958,6 +971,15 @@ protected:
  	void renderStringAmiga(uint vgaSpriteId, uint color, uint width, uint height, const char *txt);
  	void renderString(uint vgaSpriteId, uint color, uint width, uint height, const char *txt);
  
@@ -655,36 +656,70 @@ index 3cb73123..193d8e4e 100644
  			uint8 ptch = 16;
  			uint16 *dst1 = &((uint16*)_mouseData)[16 * 16 * 2 - 1];
 diff --git a/engines/agos/draw.cpp b/engines/agos/draw.cpp
-index 944797f9..b437b64f 100644
+index 944797f9..866a0ebd 100644
 --- a/engines/agos/draw.cpp
 +++ b/engines/agos/draw.cpp
-@@ -840,6 +840,9 @@ void AGOSEngine::displayScreen() {
+@@ -840,6 +840,11 @@ void AGOSEngine::displayScreen() {
  		}
  	}
  
 +	if (_chtMapOn)
 +		chtDrawMap();   // 非上游: 動態地圖每幀重繪(覆蓋 clearWindow 對疊層的抹除)
++	if (_chtGodMode && _chtHires && _scaleBuf)
++		chtDrawMapLabel(504, 4, "\xb5\x4c\xbc\xc4\xbc\xd2\xa6\xa1");   // 非上游: 右上角「無敵模式」指示
 +
  	updateBackendSurface();
  
  	if (getGameType() == GType_FF && _scrollFlag) {
 diff --git a/engines/agos/event.cpp b/engines/agos/event.cpp
-index db3ba144..e7133af0 100644
+index db3ba144..fde540c0 100644
 --- a/engines/agos/event.cpp
 +++ b/engines/agos/event.cpp
-@@ -512,6 +512,17 @@ void AGOSEngine::delay(uint amount) {
+@@ -430,6 +430,12 @@ void AGOSEngine::monsterDamageEvent(VgaTimerEntry * vte, uint dx) {
+ void AGOSEngine::delay(uint amount) {
+ 	Common::Event event;
+ 
++	// 非上游: 友善/無敵模式 — 每次 delay 把 HP+心靈力頂回滿, script 扣血被覆蓋 → 不會死。
++	if (_chtGodMode && _chtActive && getGameType() == GType_WW) {
++		_variableArray[23] = 99;
++		_variableArray[22] = 99;
++	}
++
+ 	uint32 start = _system->getMillis();
+ 	uint32 cur = start;
+ 	uint this_delay, vgaPeriod;
+@@ -512,6 +518,36 @@ void AGOSEngine::delay(uint amount) {
  						_variableArray[41] = 1;
  				}
  
-+				// 非上游: TAB 切換動態地圖(WW 現代玩家友善化)。
-+				if (_chtActive && getGameType() == GType_WW && event.kbd.keycode == Common::KEYCODE_TAB) {
-+					_chtMapOn = !_chtMapOn;
-+					if (_chtMapOn) {
-+						chtDrawMap();
-+					} else if (_scaleBuf) {
-+						memset(_scaleBuf->getPixels(), 0, _scaleBuf->pitch * _scaleBuf->h);
++				// 非上游: WW 現代玩家友善化熱鍵。
++				if (_chtActive && getGameType() == GType_WW) {
++					// TAB: 切換動態地圖
++					if (event.kbd.keycode == Common::KEYCODE_TAB) {
++						_chtMapOn = !_chtMapOn;
++						if (_chtMapOn) chtDrawMap();
++						else if (_scaleBuf) memset(_scaleBuf->getPixels(), 0, _scaleBuf->pitch * _scaleBuf->h);
++						updateBackendSurface(nullptr);
 +					}
-+					updateBackendSurface(nullptr);
++					// F5: 立即回復生命與心靈力
++					if (event.kbd.keycode == Common::KEYCODE_F5) {
++						_variableArray[23] = 99;   // HP
++						_variableArray[22] = 99;   // PP 心靈力
++					}
++					// F7: 切換友善/無敵模式(HP+心靈力保持滿)
++					if (event.kbd.keycode == Common::KEYCODE_F7) {
++						_chtGodMode = !_chtGodMode;
++						if (_chtGodMode) {
++							_variableArray[23] = 99; _variableArray[22] = 99;
++							if (_chtHires && _scaleBuf)
++								chtDrawMapLabel(504, 4, "\xb5\x4c\xbc\xc4\xbc\xd2\xa6\xa1");   // 立即顯示「無敵模式」
++						} else if (_scaleBuf) {   // 關閉: 清掉右上角指示
++							byte *hp = (byte *)_scaleBuf->getPixels();
++							for (int yy = 2; yy < 22; yy++)
++								memset(hp + yy * _scaleBuf->pitch + 500, 0, 132);
++						}
++						updateBackendSurface(nullptr);
++					}
 +				}
 +
  				_keyPressed = event.kbd;
