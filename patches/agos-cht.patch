@@ -50,7 +50,7 @@ index af27f131..5516215a 100644
  
  	if (getGameType() != GType_PP && getGameType() != GType_FF) {
 diff --git a/engines/agos/agos.h b/engines/agos/agos.h
-index 6a8d2237..55c3b072 100644
+index 6a8d2237..56f42cb0 100644
 --- a/engines/agos/agos.h
 +++ b/engines/agos/agos.h
 @@ -37,6 +37,7 @@
@@ -61,7 +61,7 @@ index 6a8d2237..55c3b072 100644
  #include "agos/detection.h"
  
  /**
-@@ -386,6 +387,20 @@ protected:
+@@ -386,6 +387,25 @@ protected:
  	bool _pause;
  	bool _speech;
  	bool _subtitles;
@@ -75,14 +75,19 @@ index 6a8d2237..55c3b072 100644
 +	bool _chtHires = false;   // 640x400 dual-layer 高解析畫布(沿用 PC98 機制)
 +	byte _chtLead = 0;        // windowPutChar Big5 雙位元組狀態
 +	bool _chtMapOn = false;   // 動態地圖顯示中(現代玩家友善化，TAB 切換)
-+	bool _chtGodMode = false; // 友善/無敵模式(F7 切換，HP+心靈力保持滿)
++	bool _chtGodMode = false; // 友善/無敵模式(F7 切換，HP+心靈力保持滿 + 噴火槍等消耗品無限)
++	bool _chtFogOff = false;  // 迷霧作弊(F8 切換，關閉後地圖一覽全貌)
 +	int _chtVerbId = 0;       // 當前 verb 圖示條選中的 verb(ha->id)，供中文 overlay 每幀重繪
 +	Common::HashMap<uint32, byte> _chtVisited;   // 地圖探索迷霧: 走過的房間(room id)
++
++	void chtRefillConsumables();   // 友善作弊: 玩家身上帶計數(kOFNumber)的消耗品頂回滿
++	int chtGiveRoomItems();        // 友善作弊: 把當前房間可拿取(kOFIcon)物品送進背包，回傳件數
++	void chtStatusMessage(const char *big5);   // 友善作弊: 頂端中央短暫中文提示(先清帶狀區再繪，避免疊字)
 +
  	bool _vgaVar9;
  	int16 _chanceModifier;
  	bool _restoreWindow6;
-@@ -958,6 +973,16 @@ protected:
+@@ -958,6 +978,16 @@ protected:
  	void renderStringAmiga(uint vgaSpriteId, uint color, uint width, uint height, const char *txt);
  	void renderString(uint vgaSpriteId, uint color, uint width, uint height, const char *txt);
  
@@ -100,7 +105,7 @@ index 6a8d2237..55c3b072 100644
  
  	byte *allocBlock(uint32 size);
 diff --git a/engines/agos/charset-fontdata.cpp b/engines/agos/charset-fontdata.cpp
-index 193986e3..df0af3fe 100644
+index 193986e3..ef68862e 100644
 --- a/engines/agos/charset-fontdata.cpp
 +++ b/engines/agos/charset-fontdata.cpp
 @@ -22,6 +22,7 @@
@@ -111,7 +116,7 @@ index 193986e3..df0af3fe 100644
  
  #include "agos/agos.h"
  #include "agos/intern.h"
-@@ -2914,6 +2915,343 @@ static const byte english_pnFont[] = {
+@@ -2914,6 +2915,356 @@ static const byte english_pnFont[] = {
  	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
  };
  
@@ -284,6 +289,18 @@ index 193986e3..df0af3fe 100644
 +	}
 +}
 +
++// 非上游: 友善作弊短暫提示 — 頂端中央畫一行中文, 先把該帶狀區清成透明(0), 避免連按疊字。
++// 位置固定在 x=300, 與 god 指示器(504)分開; god 指示器由 displayScreen 每幀重繪, 不受此清除影響。
++void AGOSEngine::chtStatusMessage(const char *big5) {
++	if (!_chtHires || !_scaleBuf)
++		return;
++	byte *hp = (byte *)_scaleBuf->getPixels();
++	uint pitch = _scaleBuf->pitch;
++	for (int yy = 2; yy < 22 && yy < _scaleBuf->h; yy++)
++		memset(hp + yy * pitch + 296, 0, 200);   // 清 x=296..496 帶狀區
++	chtDrawMapLabel(300, 4, big5);
++}
++
 +void AGOSEngine::chtDrawMap() {
 +	if (!_chtHires || !_scaleBuf || getGameType() != GType_WW)
 +		return;
@@ -300,7 +317,7 @@ index 193986e3..df0af3fe 100644
 +			if (getDoorState(room, d) == 0) continue;   // 牆
 +			uint16 ex = getExitOf(room, d);
 +			if (ex == 0) continue;
-+			if (!_chtVisited.contains(ex)) continue;   // 探索迷霧: 只顯示走過的房間
++			if (!_chtFogOff && !_chtVisited.contains(ex)) continue;   // 探索迷霧: 只顯示走過的房間(F8 作弊可關)
 +			bool have = false;
 +			for (int k = 0; k < n; k++) if (ids[k] == ex) { have = true; break; }
 +			if (have || n >= MAXR) continue;
@@ -391,11 +408,12 @@ index 193986e3..df0af3fe 100644
 +			}
 +		}
 +	}
-+	// 圖例(兩行): 白格：你所在　黃點：寶物　紅點：怪物　ＴＡＢ開關 / Ｆ５回復生命　Ｆ７無敵模式
++	// 圖例(兩行): 白格：你所在　黃點：寶物　紅點：怪物　ＴＡＢ開關 /
++	//            Ｆ５回復生命　Ｆ６給予物品　Ｆ７無敵模式　Ｆ８除霧全圖
 +	chtDrawMapLabel(panelX - 10, panelY + panelH - 20,
 +		"\xa5\xd5\xae\xe6\xa1\x47\xa7\x41\xa9\xd2\xa6\x62\xa1\x40\xb6\xc0\xc2\x49\xa1\x47\xc4\x5f\xaa\xab\xa1\x40\xac\xf5\xc2\x49\xa1\x47\xa9\xc7\xaa\xab\xa1\x40\xa2\xe2\xa2\xcf\xa2\xd0\xb6\x7d\xc3\xf6");
 +	chtDrawMapLabel(panelX - 10, panelY + panelH - 2,
-+		"\xa2\xd4\xa2\xb4\xa6\x5e\xb4\x5f\xa5\xcd\xa9\x52\xa1\x40\xa2\xd4\xa2\xb6\xb5\x4c\xbc\xc4\xbc\xd2\xa6\xa1");
++		"\xa2\xd4\xa2\xb4\xa6\x5e\xb4\x5f\xa5\xcd\xa9\x52\xa1\x40\xa2\xd4\xa2\xb5\xb5\xb9\xa4\xa9\xaa\xab\xab\x7e\xa1\x40\xa2\xd4\xa2\xb6\xb5\x4c\xbc\xc4\xbc\xd2\xa6\xa1\xa1\x40\xa2\xd4\xa2\xb7\xb0\xa3\xc3\xfa\xa5\xfe\xb9\xcf");
 +#undef MP
 +}
 +
@@ -768,10 +786,10 @@ index 944797f9..27157cb3 100644
  
  	if (getGameType() == GType_FF && _scrollFlag) {
 diff --git a/engines/agos/event.cpp b/engines/agos/event.cpp
-index db3ba144..fde540c0 100644
+index db3ba144..8685e359 100644
 --- a/engines/agos/event.cpp
 +++ b/engines/agos/event.cpp
-@@ -430,6 +430,12 @@ void AGOSEngine::monsterDamageEvent(VgaTimerEntry * vte, uint dx) {
+@@ -430,6 +430,13 @@ void AGOSEngine::monsterDamageEvent(VgaTimerEntry * vte, uint dx) {
  void AGOSEngine::delay(uint amount) {
  	Common::Event event;
  
@@ -779,12 +797,13 @@ index db3ba144..fde540c0 100644
 +	if (_chtGodMode && _chtActive && getGameType() == GType_WW) {
 +		_variableArray[23] = 99;
 +		_variableArray[22] = 99;
++		chtRefillConsumables();   // 噴火槍等消耗品次數頂回滿 → 無限不消耗
 +	}
 +
  	uint32 start = _system->getMillis();
  	uint32 cur = start;
  	uint this_delay, vgaPeriod;
-@@ -512,6 +518,36 @@ void AGOSEngine::delay(uint amount) {
+@@ -512,6 +519,51 @@ void AGOSEngine::delay(uint amount) {
  						_variableArray[41] = 1;
  				}
  
@@ -801,6 +820,21 @@ index db3ba144..fde540c0 100644
 +					if (event.kbd.keycode == Common::KEYCODE_F5) {
 +						_variableArray[23] = 99;   // HP
 +						_variableArray[22] = 99;   // PP 心靈力
++					}
++					// F6: 把當前房間可拿取物品一鍵送進背包
++					if (event.kbd.keycode == Common::KEYCODE_F6) {
++						int got = chtGiveRoomItems();
++						chtStatusMessage(got > 0 ? "\xa4\x77\xac\x42\xa8\xfa\xaa\xab\xab\x7e" /*已拾取物品*/
++						                         : "\xa9\xd0\xa4\xba\xb5\x4c\xaa\xab" /*房內無物*/);
++						updateBackendSurface(nullptr);
++					}
++					// F8: 切換地圖迷霧(關閉後一覽全貌)
++					if (event.kbd.keycode == Common::KEYCODE_F8) {
++						_chtFogOff = !_chtFogOff;
++						if (_chtMapOn) chtDrawMap();
++						chtStatusMessage(_chtFogOff ? "\xb0\x67\xc3\xfa\xa4\x77\xb0\xa3" /*迷霧已除*/
++						                            : "\xb0\x67\xc3\xfa\xb4\x5f\xad\xec" /*迷霧復原*/);
++						updateBackendSurface(nullptr);
 +					}
 +					// F7: 切換友善/無敵模式(HP+心靈力保持滿)
 +					if (event.kbd.keycode == Common::KEYCODE_F7) {
@@ -851,6 +885,58 @@ index 88d98b7f..1cb02790 100644
  			}
  			if (ha->itemPtr && (!ha->verb || _verbHitArea ||
  					(_hitAreaSubjectItem != ha->itemPtr && (ha->flags & kBFBoxItem)))
+diff --git a/engines/agos/items.cpp b/engines/agos/items.cpp
+index 433bc712..63dbfb8c 100644
+--- a/engines/agos/items.cpp
++++ b/engines/agos/items.cpp
+@@ -46,6 +46,47 @@ void AGOSEngine::allocItemHeap() {
+ 	_itemHeap.clear();
+ }
+ 
++// 非上游: 友善作弊 — 把玩家(item 1)背包裡帶計數(kOFNumber)的消耗品頂回滿。
++// Waxworks 的化學噴火槍(chemical sprayer)等武器用一次扣一次數,存在 objectFlagValue 的
++// kOFNumber 槽;無敵模式開啟時每幀補到 99,達成「次數無限不消耗」。只動玩家身上的物品,
++// 不碰場景/謎題計數,把副作用縮到最小。
++void AGOSEngine::chtRefillConsumables() {
++	Item *player = derefItem(1);
++	if (!player)
++		return;
++	Item *it = derefItem(player->child);
++	while (it) {
++		SubObject *so = (SubObject *)findChildOfType(it, kObjectType);
++		if (so && (so->objectFlags & kOFNumber)) {
++			uint offs = getOffsetOfChild2Param(so, kOFNumber);
++			if (so->objectFlagValue[offs] < 99)
++				so->objectFlagValue[offs] = 99;
++		}
++		it = derefItem(it->next);
++	}
++}
++
++// 非上游: 友善作弊 — 把當前房間裡所有「可拿取(kOFIcon)」物品直接送進玩家背包,回傳件數。
++// 讓卡關的現代玩家一鍵取得重要道具,不必逐一 search/take。
++int AGOSEngine::chtGiveRoomItems() {
++	Item *room = derefItem(_currentRoom);
++	Item *player = derefItem(1);
++	if (!room || !player)
++		return 0;
++	int n = 0;
++	Item *it = derefItem(room->child);
++	while (it) {
++		Item *nextIt = derefItem(it->next);   // setItemParent 會改 next,先存
++		SubObject *so = (SubObject *)findChildOfType(it, kObjectType);
++		if (so && (so->objectFlags & kOFIcon) && it != player) {
++			setItemParent(it, player);
++			n++;
++		}
++		it = nextIt;
++	}
++	return n;
++}
++
+ bool AGOSEngine_Elvira2::hasIcon(Item *item) {
+ 	SubObject *child = (SubObject *)findChildOfType(item, kObjectType);
+ 	return (child && (child->objectFlags & kOFIcon) != 0);
 diff --git a/engines/agos/menus.cpp b/engines/agos/menus.cpp
 index 008162eb..ed1eed9d 100644
 --- a/engines/agos/menus.cpp
