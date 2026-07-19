@@ -50,7 +50,7 @@ index af27f131..5516215a 100644
  
  	if (getGameType() != GType_PP && getGameType() != GType_FF) {
 diff --git a/engines/agos/agos.h b/engines/agos/agos.h
-index 6a8d2237..56f42cb0 100644
+index 6a8d2237..2f36e4d0 100644
 --- a/engines/agos/agos.h
 +++ b/engines/agos/agos.h
 @@ -37,6 +37,7 @@
@@ -61,7 +61,7 @@ index 6a8d2237..56f42cb0 100644
  #include "agos/detection.h"
  
  /**
-@@ -386,6 +387,25 @@ protected:
+@@ -386,6 +387,30 @@ protected:
  	bool _pause;
  	bool _speech;
  	bool _subtitles;
@@ -80,6 +80,11 @@ index 6a8d2237..56f42cb0 100644
 +	int _chtVerbId = 0;       // 當前 verb 圖示條選中的 verb(ha->id)，供中文 overlay 每幀重繪
 +	Common::HashMap<uint32, byte> _chtVisited;   // 地圖探索迷霧: 走過的房間(room id)
 +
++	int _chtLastBigImg = 0;        // 最後繪製的大圖(zone*1000+image)，供 title 中文疊層辨識
++	bool _chtTitleSeen = false;    // 已在 WAXWORKS logo 疊過中文
++	bool _chtTitleDone = false;    // 已離開 title(閂鎖)，之後同號(1001)場景不再疊，避免與入口撞號
++	bool _chtTitleCleared = false; // 已清掉 title 疊層殘影(一次性)
++	void chtDrawTitle();           // title 畫面疊「蠟像館之謎」中文(24px, 疊層)
 +	void chtRefillConsumables();   // 友善作弊: 玩家身上帶計數(kOFNumber)的消耗品頂回滿
 +	int chtGiveRoomItems();        // 友善作弊: 把當前房間可拿取(kOFIcon)物品送進背包，回傳件數
 +	void chtStatusMessage(const char *big5);   // 友善作弊: 頂端中央短暫中文提示(先清帶狀區再繪，避免疊字)
@@ -87,7 +92,7 @@ index 6a8d2237..56f42cb0 100644
  	bool _vgaVar9;
  	int16 _chanceModifier;
  	bool _restoreWindow6;
-@@ -958,6 +978,16 @@ protected:
+@@ -958,6 +983,16 @@ protected:
  	void renderStringAmiga(uint vgaSpriteId, uint color, uint width, uint height, const char *txt);
  	void renderString(uint vgaSpriteId, uint color, uint width, uint height, const char *txt);
  
@@ -105,7 +110,7 @@ index 6a8d2237..56f42cb0 100644
  
  	byte *allocBlock(uint32 size);
 diff --git a/engines/agos/charset-fontdata.cpp b/engines/agos/charset-fontdata.cpp
-index 193986e3..ef68862e 100644
+index 193986e3..386f3d2f 100644
 --- a/engines/agos/charset-fontdata.cpp
 +++ b/engines/agos/charset-fontdata.cpp
 @@ -22,6 +22,7 @@
@@ -116,7 +121,7 @@ index 193986e3..ef68862e 100644
  
  #include "agos/agos.h"
  #include "agos/intern.h"
-@@ -2914,6 +2915,356 @@ static const byte english_pnFont[] = {
+@@ -2914,6 +2915,399 @@ static const byte english_pnFont[] = {
  	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
  };
  
@@ -299,6 +304,49 @@ index 193986e3..ef68862e 100644
 +	for (int yy = 2; yy < 22 && yy < _scaleBuf->h; yy++)
 +		memset(hp + yy * pitch + 296, 0, 200);   // 清 x=296..496 帶狀區
 +	chtDrawMapLabel(300, 4, big5);
++}
++
++// 非上游: WAXWORKS title logo 下方疊中文「蠟像館之謎」(24px)。畫在 640x400 疊層上,
++// 帶 1px 深色描邊 + 落影, 在火焰紅 logo/黑底上都清楚。每幀重繪(疊層會被抹除)。
++void AGOSEngine::chtDrawTitle() {
++	if (!_scaleBuf || !_cht.font)
++		return;
++	static const byte kTitle[] = { 0xc4,0xfa, 0xb9,0xb3, 0xc0,0x5d, 0xa4,0xa7, 0xc1,0xbc, 0 };  // 蠟像館之謎
++	int fw = _cht.fontW, fh = _cht.fontH, bpr = _cht.fontBpr;
++	int nchar = 5, gap = 6;
++	int totalW = nchar * fw + (nchar - 1) * gap;
++	int x0 = (_scaleBuf->w - totalW) / 2;    // 水平置中
++	int y0 = 250;                            // logo(疊層 y≈56..232)下方
++	byte fill = chtReadableColor(15), edge = chtOutlineColor();
++	byte *hp = (byte *)_scaleBuf->getPixels();
++	uint pitch = _scaleBuf->pitch;
++	const byte *s = kTitle;
++	int cx = x0;
++	while (*s) {
++		const byte *g = _cht.glyph(s[0], s[1]);
++		s += 2;
++		if (g) {
++			// 先描邊(8 向偏移填 edge), 再填字(fill) → 任意底色都可讀
++			for (int pass = 0; pass < 2; pass++) {
++				byte col = pass == 0 ? edge : fill;
++				for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++) {
++					if (pass == 0 && dx == 0 && dy == 0) continue;
++					if (pass == 1 && (dx != 0 || dy != 0)) continue;
++					for (int row = 0; row < fh; row++) {
++						int yy = y0 + row + (pass == 0 ? dy : 0);
++						if (yy < 0 || yy >= _scaleBuf->h) continue;
++						const byte *gr = g + row * bpr;
++						for (int c = 0; c < fw; c++) {
++							int xx = cx + c + (pass == 0 ? dx : 0);
++							if (xx < 0 || xx >= _scaleBuf->w) continue;
++							if (gr[c >> 3] & (0x80 >> (c & 7))) hp[yy * pitch + xx] = col;
++						}
++					}
++				}
++			}
++		}
++		cx += fw + gap;
++	}
 +}
 +
 +void AGOSEngine::chtDrawMap() {
@@ -766,10 +814,18 @@ index 3cb73123..193d8e4e 100644
  			uint8 ptch = 16;
  			uint16 *dst1 = &((uint16*)_mouseData)[16 * 16 * 2 - 1];
 diff --git a/engines/agos/draw.cpp b/engines/agos/draw.cpp
-index 944797f9..27157cb3 100644
+index 944797f9..8d3fe53c 100644
 --- a/engines/agos/draw.cpp
 +++ b/engines/agos/draw.cpp
-@@ -840,6 +840,15 @@ void AGOSEngine::displayScreen() {
+@@ -19,6 +19,7 @@
+  *
+  */
+ 
++#include "common/file.h"
+ #include "common/endian.h"
+ #include "common/system.h"
+ 
+@@ -840,6 +841,25 @@ void AGOSEngine::displayScreen() {
  		}
  	}
  
@@ -781,6 +837,16 @@ index 944797f9..27157cb3 100644
 +		chtDrawVerbName();   // 非上游: verb 圖示條中文 overlay(地圖開時不畫,免衝突)
 +	if (_chtGodMode && _chtHires && _scaleBuf)
 +		chtDrawMapLabel(504, 4, "\xb5\x4c\xbc\xc4\xbc\xd2\xa6\xa1");   // 非上游: 右上角「無敵模式」指示
++	if (_chtActive && _chtHires && _scaleBuf && _chtLastBigImg == 1001 && !_chtTitleDone) {
++		chtDrawTitle();   // 非上游: WAXWORKS title logo 下疊中文「蠟像館之謎」(閂鎖: 僅開場首次 1001)
++		_chtTitleSeen = true;
++	} else if (_chtTitleSeen && !_chtTitleCleared && _scaleBuf) {
++		// 離開 title 後清掉殘留在疊層的中文(否則會殘影到入口等同號 1001 場景)
++		byte *hp = (byte *)_scaleBuf->getPixels();
++		for (int yy = 244; yy < 282 && yy < _scaleBuf->h; yy++)
++			memset(hp + yy * _scaleBuf->pitch, 0, _scaleBuf->pitch);
++		_chtTitleCleared = true;
++	}
 +
  	updateBackendSurface();
  
@@ -1036,6 +1102,35 @@ index 1aa590b8..14e735f2 100644
  	int x;
  	switch (_boxLineCount) {
  	case 1: x = _lineCounts[0];
+diff --git a/engines/agos/vga.cpp b/engines/agos/vga.cpp
+index 15eb01c4..cc2b5c46 100644
+--- a/engines/agos/vga.cpp
++++ b/engines/agos/vga.cpp
+@@ -29,6 +29,7 @@
+ 
+ #include "common/debug-channels.h"
+ #include "common/endian.h"
++#include "common/file.h"
+ #include "common/system.h"
+ #include "common/textconsole.h"
+ 
+@@ -650,6 +651,16 @@ void AGOSEngine::drawImage_init(int16 image, uint16 palette, int16 x, int16 y, u
+ 	if (height == 0 || width == 0)
+ 		return;
+ 
++	// 非上游: 追蹤最後繪製的「大圖」(如 intro logo/全螢幕背景), 供 title 中文疊層辨識畫面。
++	// 1001(zone1/image1)非唯一(每場景主背景都用此號); WAXWORKS logo 是首次 1001,
++	// 入口背景是之後的 1001 → 用閂鎖: 疊過中文且離開 1001 後就永久關閉。
++	if (getGameType() == GType_WW && height >= 40) {
++		int newBig = _vgaCurZoneNum * 1000 + state.image;
++		if (_chtLastBigImg == 1001 && newBig != 1001 && _chtTitleSeen)
++			_chtTitleDone = true;
++		_chtLastBigImg = newBig;
++	}
++
+ 	if (DebugMan.isDebugChannelEnabled(kDebugImageDump))
+ 		dumpSingleBitmap(_vgaCurZoneNum, state.image, state.srcPtr, width, height,
+ 											 state.palette);
 diff --git a/engines/agos/window.cpp b/engines/agos/window.cpp
 index 03835590..5a047983 100644
 --- a/engines/agos/window.cpp
