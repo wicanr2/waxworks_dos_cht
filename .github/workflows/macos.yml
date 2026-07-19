@@ -28,12 +28,18 @@ env:
   # AGOS(Waxworks floppy)精簡：只需自編 universal SDL2 + 內建 mt32emu(MT-32)
   # + 內建 nuked-opl(AdLib)。其餘外部媒體/格式/網路庫全關(scummvm-static 需靜態 .a，
   # runner 沒有；Linux 端已驗證 AGOS 在 --disable-zlib 等精簡下中文正常)。
-  # 這組是 Linux docker 對 ScummVM v2.9.1 實測「configure 接受 + AGOS 編出 + Waxworks
-  # 中文正常」的精簡集(別照抄較新版 qfg2 的旗標，如 --disable-system-printing 在 2.9.1 不存在)。
+  # [HARD] 全 disable 所有外部可選庫。理由(kb mac-app-cross-pack)：runner 上 brew 的 .a
+  # 是 arm64-only，configure 一旦自動偵測到(如 libjpeg)就連進去 → x86_64(Rosetta)弧
+  # 「found architecture arm64, required x86_64」undefined symbols 連結失敗。全關才乾淨。
+  # 旗標全部撈自 v2.9.1 configure(別照抄較新版旗標，如 --disable-system-printing 不存在)。
+  # 保留 mt32emu(MT-32)、nuked-opl(AdLib) — 內建，不 disable。
   LEAN_FLAGS: >-
-    --disable-mad --disable-vorbis --disable-flac --disable-fluidsynth
-    --disable-mpeg2 --disable-theoradec --disable-faad --disable-libcurl
-    --disable-zlib --disable-png --disable-freetype2 --disable-sdlnet
+    --disable-a52 --disable-discord --disable-enet --disable-faad --disable-flac
+    --disable-fluidlite --disable-fluidsynth --disable-freetype2 --disable-fribidi
+    --disable-gif --disable-jpeg --disable-libcurl --disable-lua --disable-mad
+    --disable-mikmod --disable-mpcdec --disable-mpeg2 --disable-ogg --disable-openmpt
+    --disable-png --disable-retrowave --disable-sdlnet --disable-sndio --disable-sparkle
+    --disable-theoradec --disable-timidity --disable-vorbis --disable-vpx --disable-zlib
 
 jobs:
   macos-universal:
