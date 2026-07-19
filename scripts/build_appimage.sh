@@ -30,8 +30,10 @@ HERE="$(dirname "$(readlink -f "${0}")")"
 export LD_LIBRARY_PATH="${HERE}/usr/lib:${LD_LIBRARY_PATH}"
 SAVE="${XDG_DATA_HOME:-$HOME/.local/share}/waxworks-cht/saves"; mkdir -p "$SAVE"
 DATA="${HERE}/usr/share/scummvm"
-exec "${HERE}/usr/bin/scummvm" -p "${HERE}/usr/share/waxworks-game" \
-     --themepath="$DATA" --extrapath="$DATA" --savepath="$SAVE" --auto-detect "$@"
+GAME="${HERE}/usr/share/waxworks-game"
+exec "${HERE}/usr/bin/scummvm" -p "$GAME" \
+     --themepath="$DATA" --extrapath="$GAME" --savepath="$SAVE" \
+     --music-driver=mt32 --auto-detect "$@"
 EOF
   chmod +x $APP/AppRun
   cat > $APP/scummvm.desktop <<"EOF"

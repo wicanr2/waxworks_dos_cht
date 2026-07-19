@@ -44,3 +44,6 @@ translations/batches/*.tsv
 
 # 全 VGA dump contact sheet(資產傾印,不公開)
 docs/img/bestiary/_all_dumps.png
+
+# 推廣片工作目錄(擷取素材/中間檔,不入庫; 成品放 dist-all/ 作 release)
+promo/

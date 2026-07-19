@@ -36,7 +36,9 @@ docker run --rm -v "$PROJ:/w" -w /w debian:bookworm-slim bash -c '
   cp gui/themes/scummmodern.zip gui/themes/scummclassic.zip gui/themes/scummremastered.zip \
      gui/themes/gui-icons.dat gui/themes/shaders.dat gui/themes/translations.dat \
      dists/engine-data/fonts.dat dists/engine-data/fonts-cjk.dat $OUT/data/
-  printf "@echo off\r\ncd /d \"%%~dp0\"\r\nif not exist saves mkdir saves\r\nscummvm.exe -p game --themepath=data --extrapath=data --auto-detect --savepath=saves\r\npause\r\n" > "$OUT/play-waxworks.bat"
+  # MT-32 ROM 也放進 extrapath(data), 供 Munt 模擬器找到 → 原版真實配樂
+  cp -L /w/run_game/MT32_CONTROL.ROM /w/run_game/MT32_PCM.ROM $OUT/data/ 2>/dev/null || true
+  printf "@echo off\r\ncd /d \"%%~dp0\"\r\nif not exist saves mkdir saves\r\nscummvm.exe -p game --themepath=data --extrapath=data --music-driver=mt32 --auto-detect --savepath=saves\r\npause\r\n" > "$OUT/play-waxworks.bat"
   cp -rL /w/run_game/* $OUT/game/
   echo "=== 相依 DLL ==="; x86_64-w64-mingw32-objdump -p scummvm.exe | grep "DLL Name" | sort -u
   cd /w/dist-all; rm -f Waxworks-CHT-FULL-win64.zip

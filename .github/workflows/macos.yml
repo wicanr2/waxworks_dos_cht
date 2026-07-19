@@ -1,0 +1,142 @@
+name: macOS universal（蠟像館之謎繁中 patched ScummVM）
+
+# 在 GitHub 的 macOS runner 上，把本 repo 的 agos-cht.patch 套進 ScummVM 2.9.1，
+# 分別在 arm64 / x86_64 兩台 runner 編出 AGOS-only 引擎，再 lipo 合成 universal binary，
+# 打包成 zip（只含 patched ScummVM + 繁中字型 + 引擎資料；遊戲原檔與 MT-32 ROM 由使用者自備，
+# 符合 patch-only 政策）。手動觸發或打 tag 觸發。
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+env:
+  SCUMMVM_TAG: v2.9.1
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-14
+          - arch: x86_64
+            runner: macos-13
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: 取出繁中 repo（patch / 字型 / 工具）
+        uses: actions/checkout@v4
+        with:
+          path: cht
+
+      - name: 安裝相依（SDL2）
+        run: brew install sdl2 sdl2_net a52dec
+
+      - name: 取 ScummVM ${{ env.SCUMMVM_TAG }} 原始碼
+        run: |
+          git clone --depth 1 --branch "$SCUMMVM_TAG" https://github.com/scummvm/scummvm.git scummvm
+
+      - name: 套用 agos-cht.patch
+        run: |
+          cd scummvm
+          git apply --whitespace=nowarn "$GITHUB_WORKSPACE/cht/patches/agos-cht.patch"
+          echo "✓ patch 套用成功"
+
+      - name: configure + build（AGOS only，${{ matrix.arch }}）
+        run: |
+          cd scummvm
+          export CXX="clang++ -arch ${{ matrix.arch }}"
+          export CC="clang -arch ${{ matrix.arch }}"
+          ./configure --disable-all-engines --enable-engine=agos --enable-release \
+            --disable-mad --disable-vorbis --disable-flac --disable-fluidsynth \
+            --disable-mpeg2 --disable-theoradec --disable-faad --disable-libcurl
+          grep -q '^ENABLE_AGOS' config.mk || { echo '!! agos 未啟用'; exit 1; }
+          make -j$(sysctl -n hw.ncpu)
+          file scummvm
+
+      - name: 上傳單一 arch binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: scummvm-${{ matrix.arch }}
+          path: scummvm/scummvm
+
+      - name: 上傳引擎資料（僅 arm64 job 做一次）
+        if: matrix.arch == 'arm64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: scummvm-data
+          path: |
+            scummvm/gui/themes/scummmodern.zip
+            scummvm/gui/themes/scummclassic.zip
+            scummvm/gui/themes/scummremastered.zip
+            scummvm/gui/themes/gui-icons.dat
+            scummvm/gui/themes/shaders.dat
+            scummvm/gui/themes/translations.dat
+            scummvm/dists/engine-data/fonts.dat
+            scummvm/dists/engine-data/fonts-cjk.dat
+
+  package:
+    needs: build
+    runs-on: macos-14
+    steps:
+      - name: 取出繁中 repo
+        uses: actions/checkout@v4
+        with:
+          path: cht
+
+      - name: 下載兩 arch binary + 資料
+        uses: actions/download-artifact@v4
+        with:
+          path: dl
+
+      - name: lipo 合成 universal + 組裝 zip
+        run: |
+          set -e
+          OUT="蠟像館之謎-CHT-macOS-universal"
+          mkdir -p "$OUT/data" "$OUT/game" "$OUT/saves"
+          lipo -create -output "$OUT/scummvm" \
+            dl/scummvm-arm64/scummvm dl/scummvm-x86_64/scummvm
+          chmod +x "$OUT/scummvm"
+          file "$OUT/scummvm"
+          lipo -info "$OUT/scummvm"
+          # 引擎資料 + 繁中字型（放進 extrapath=data）
+          cp dl/scummvm-data/* "$OUT/data/"
+          cp cht/fonts/waxworks_zh16.dcjk cht/fonts/waxworks_zh24.dcjk cht/fonts/waxworks_zh.tab "$OUT/game/"
+          # 啟動器：使用者把遊戲原檔（GAMEPC、TABLES* 等）與 MT32_CONTROL.ROM/MT32_PCM.ROM 放進 game/
+          cat > "$OUT/play-waxworks.command" <<'SH'
+          #!/bin/bash
+          cd "$(dirname "$0")"
+          xattr -dr com.apple.quarantine ./scummvm 2>/dev/null || true
+          ./scummvm -p game --themepath=data --extrapath=game \
+            --music-driver=mt32 --auto-detect --savepath=saves
+          SH
+          chmod +x "$OUT/play-waxworks.command"
+          cat > "$OUT/README.txt" <<'TXT'
+          《蠟像館之謎》繁體中文版 — macOS universal（patched ScummVM）
+
+          使用方式：
+          1. 把你合法擁有的 Waxworks(Floppy/DOS) 原檔（GAMEPC、TABLES01…、TEXT01…、
+             ROOMS0x、STATELST 等全部檔案）複製進本資料夾的 game/ 子目錄。
+          2. 想要原版 MT-32 真實配樂：把 MT32_CONTROL.ROM 與 MT32_PCM.ROM 也放進 game/。
+             （沒有 ROM 也能玩，會改用一般 MIDI 音色。）
+          3. 雙擊 play-waxworks.command 開始遊戲。
+             首次執行若被 Gatekeeper 擋，於「系統設定 → 隱私權與安全性」允許，或右鍵→打開。
+
+          繁中字型（waxworks_zh*.dcjk / .tab）已內含於 game/。
+          本套件不含遊戲原檔與 ROM（尊重原作版權，patch-only）。
+          TXT
+          zip -rq "${OUT}.zip" "$OUT"
+          ls -lh "${OUT}.zip"
+
+      - name: 上傳 macOS universal zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: 蠟像館之謎-CHT-macOS-universal
+          path: 蠟像館之謎-CHT-macOS-universal.zip
+
+      - name: 附加到 Release（打 tag 時）
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: 蠟像館之謎-CHT-macOS-universal.zip
