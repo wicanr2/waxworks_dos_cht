@@ -1,165 +1,219 @@
-name: macOS universal（蠟像館之謎繁中 patched ScummVM）
+name: macos-universal（蠟像館之謎繁中 patched ScummVM）
 
-# 在 GitHub 的 macOS runner 上，把本 repo 的 agos-cht.patch 套進 ScummVM 2.9.1，
-# 分別在 arm64 / x86_64 兩台 runner 編出 AGOS-only 引擎，再 lipo 合成 universal binary，
-# 打包成 zip（只含 patched ScummVM + 繁中字型 + 引擎資料；遊戲原檔與 MT-32 ROM 由使用者自備，
-# 符合 patch-only 政策）。手動觸發或打 tag 觸發。
+# 在 GitHub macOS runner 把本 repo 的 agos-cht.patch 套進 ScummVM 2.9.1，
+# 產出 universal(arm64+x86_64) 的 ScummVM.app + .tar.gz/.dmg。
+# 只含 patched 引擎 + 繁中字型；遊戲原檔與 MT-32 ROM 由使用者自備(patch-only)。
+#
+# 踩雷防呆(來源 kb mac-app-cross-pack / qfg2-ega-cht 已驗證 workflow)：
+# [HARD] 不能在 Linux 交叉編 macOS → 借 macos-14(Apple Silicon)runner。
+# [HARD] macos-13(Intel)runner 退役中、常永久 queued → 只用 macos-14，
+#        x86_64 弧改在同一台走 `arch -x86_64`(Rosetta) native 各編一次 + lipo -create。
+#        單次雙 -arch 塞給 ScummVM configure 的版本解析會炸，故每弧各編。
+# [HARD] 不用 brew sdl2(2026 起是 sdl2-compat shim→runtime dlopen libSDL3，玩家端黑畫面)
+#        改自源碼編 pinned 真 SDL2 2.30.9(防呆：dylib >1MB 才是真 SDL2，otool 不得見 SDL3)。
+# [HARD] ScummVM configure 非 autoconf，CXXFLAGS/LDFLAGS 只能當環境變數前綴，不能當引數。
+# [HARD] MT-32 保持 enable(不帶 --disable-mt32emu)：config.h 須有 USE_MT32EMU，否則 fail。
+# universal binary 與 Frameworks 內 SDL2 都要 lipo 成雙弧，主程式 install_name_tool
+# 兩弧 prefix 各 -change 到 @executable_path/../Frameworks，改過後 ad-hoc 重簽。
 
 on:
   workflow_dispatch:
   push:
-    tags: ['v*']
+    tags: ['v*-macos']
 
 env:
-  SCUMMVM_TAG: v2.9.1
+  SCUMMVM_TAG: "v2.9.1"
+  SDL_VER: "2.30.9"
+  MIN_OS: "11.0"
+  # AGOS(Waxworks floppy)精簡：只需自編 universal SDL2 + 內建 mt32emu(MT-32)
+  # + 內建 nuked-opl(AdLib)。其餘外部媒體/格式/網路庫全關(scummvm-static 需靜態 .a，
+  # runner 沒有；Linux 端已驗證 AGOS 在 --disable-zlib 等精簡下中文正常)。
+  LEAN_FLAGS: >-
+    --disable-mad --disable-ogg --disable-vorbis --disable-tremor --disable-flac
+    --disable-faad --disable-mpcdec --disable-openmpt --disable-mikmod
+    --disable-fluidsynth --disable-fluidlite --disable-sonivox
+    --disable-theoradec --disable-vpx --disable-mpeg2 --disable-a52
+    --disable-png --disable-jpeg --disable-gif --disable-freetype2 --disable-fribidi
+    --disable-zlib --disable-libcurl --disable-cloud --disable-enet --disable-sdlnet
+    --disable-discord --disable-sparkle --disable-lua
+    --disable-tts --disable-taskbar --disable-system-dialogs --disable-system-printing
 
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: arm64
-            runner: macos-14
-          - arch: x86_64
-            runner: macos-13
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - name: 取出繁中 repo（patch / 字型 / 工具）
-        uses: actions/checkout@v4
-        with:
-          path: cht
-
-      - name: 自編 SDL2 靜態庫（${{ matrix.arch }} 原生）
-        run: |
-          set -e
-          SDL_VER=2.30.9
-          curl -fsSL -o sdl2.tar.gz \
-            "https://github.com/libsdl-org/SDL/releases/download/release-${SDL_VER}/SDL2-${SDL_VER}.tar.gz"
-          tar xzf sdl2.tar.gz
-          cd "SDL2-${SDL_VER}"
-          # runner 原生 arch(macos-14=arm64 / macos-13=x86_64)，非交叉編。
-          # 只建靜態庫 → 之後靜態連進 scummvm，產物不依賴外部 dylib。
-          ./configure --prefix="$GITHUB_WORKSPACE/sdlinst" \
-            --disable-shared --enable-static \
-            CC="clang -arch ${{ matrix.arch }}" CXX="clang++ -arch ${{ matrix.arch }}"
-          make -j"$(sysctl -n hw.ncpu)"
-          make install
-          echo "SDL_PREFIX=$GITHUB_WORKSPACE/sdlinst" >> "$GITHUB_ENV"
-          ls -la "$GITHUB_WORKSPACE/sdlinst/lib/libSDL2.a"
-
-      - name: 取 ScummVM ${{ env.SCUMMVM_TAG }} 原始碼
-        run: |
-          git clone --depth 1 --branch "$SCUMMVM_TAG" https://github.com/scummvm/scummvm.git scummvm
-
-      - name: 套用 agos-cht.patch
-        run: |
-          cd scummvm
-          git apply --whitespace=nowarn "$GITHUB_WORKSPACE/cht/patches/agos-cht.patch"
-          echo "✓ patch 套用成功"
-
-      - name: configure + build（AGOS only，靜態 SDL2，${{ matrix.arch }}）
-        run: |
-          cd scummvm
-          export CXX="clang++ -arch ${{ matrix.arch }}"
-          export CC="clang -arch ${{ matrix.arch }}"
-          export PATH="$SDL_PREFIX/bin:$PATH"
-          ./configure --disable-all-engines --enable-engine=agos --enable-release \
-            --with-sdl-prefix="$SDL_PREFIX" \
-            --disable-mad --disable-vorbis --disable-flac --disable-fluidsynth \
-            --disable-mpeg2 --disable-theoradec --disable-faad --disable-libcurl
-          grep -q '^ENABLE_AGOS' config.mk || { echo '!! agos 未啟用'; exit 1; }
-          make -j"$(sysctl -n hw.ncpu)"
-          file scummvm
-          echo "=== 相依檢查(應無外部 libSDL2.dylib, 只剩系統庫/framework) ==="
-          otool -L scummvm
-          if otool -L scummvm | grep -i 'libSDL2'; then
-            echo '!! 仍動態連到 SDL2，靜態連結失敗'; exit 1
-          fi
-          echo "✓ SDL2 已靜態連入，產物自足"
-
-      - name: 上傳單一 arch binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: scummvm-${{ matrix.arch }}
-          path: scummvm/scummvm
-
-      - name: 上傳引擎資料（僅 arm64 job 做一次）
-        if: matrix.arch == 'arm64'
-        uses: actions/upload-artifact@v4
-        with:
-          name: scummvm-data
-          path: |
-            scummvm/gui/themes/scummmodern.zip
-            scummvm/gui/themes/scummclassic.zip
-            scummvm/gui/themes/scummremastered.zip
-            scummvm/gui/themes/gui-icons.dat
-            scummvm/gui/themes/shaders.dat
-            scummvm/gui/themes/translations.dat
-            scummvm/dists/engine-data/fonts.dat
-            scummvm/dists/engine-data/fonts-cjk.dat
-
-  package:
-    needs: build
+  macos-universal:
     runs-on: macos-14
     steps:
-      - name: 取出繁中 repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           path: cht
 
-      - name: 下載兩 arch binary + 資料
-        uses: actions/download-artifact@v4
-        with:
-          path: dl
-
-      - name: lipo 合成 universal + 組裝 zip
+      - name: 下載 SDL2 原始碼(pinned，避免 brew sdl2-compat shim)
         run: |
-          set -e
-          OUT="蠟像館之謎-CHT-macOS-universal"
-          mkdir -p "$OUT/data" "$OUT/game" "$OUT/saves"
-          lipo -create -output "$OUT/scummvm" \
-            dl/scummvm-arm64/scummvm dl/scummvm-x86_64/scummvm
-          chmod +x "$OUT/scummvm"
-          file "$OUT/scummvm"
-          lipo -info "$OUT/scummvm"
-          # 引擎資料 + 繁中字型（放進 extrapath=data）
-          cp dl/scummvm-data/* "$OUT/data/"
-          cp cht/fonts/waxworks_zh16.dcjk cht/fonts/waxworks_zh24.dcjk cht/fonts/waxworks_zh.tab "$OUT/game/"
-          # 啟動器：使用者把遊戲原檔（GAMEPC、TABLES* 等）與 MT32_CONTROL.ROM/MT32_PCM.ROM 放進 game/
+          curl -fsSL -o "$RUNNER_TEMP/SDL2.tar.gz" \
+            "https://github.com/libsdl-org/SDL/releases/download/release-${SDL_VER}/SDL2-${SDL_VER}.tar.gz"
+
+      - name: 自編 SDL2 — arm64(native)
+        run: |
+          set -euo pipefail
+          rm -rf "$RUNNER_TEMP/sdl-build-arm64" && mkdir -p "$RUNNER_TEMP/sdl-build-arm64"
+          tar xf "$RUNNER_TEMP/SDL2.tar.gz" -C "$RUNNER_TEMP/sdl-build-arm64" --strip-components=1
+          cd "$RUNNER_TEMP/sdl-build-arm64"
+          export CFLAGS="-arch arm64 -mmacosx-version-min=${MIN_OS}"
+          export CXXFLAGS="$CFLAGS" LDFLAGS="$CFLAGS"
+          ./configure --prefix="$RUNNER_TEMP/sdl-arm64" --without-x
+          make -j"$(sysctl -n hw.ncpu)"
+          make install
+          SIZE=$(stat -f%z "$RUNNER_TEMP/sdl-arm64/lib/libSDL2-2.0.0.dylib")
+          echo "arm64 libSDL2 size=$SIZE"
+          [ "$SIZE" -gt 1000000 ] || { echo "### 疑似 sdl2-compat shim ###"; exit 1; }
+          otool -L "$RUNNER_TEMP/sdl-arm64/lib/libSDL2-2.0.0.dylib" | grep -qi SDL3 && { echo "### 混入 SDL3 ###"; exit 1; } || true
+
+      - name: 自編 SDL2 — x86_64(arch -x86_64 走 Rosetta)
+        run: |
+          set -euo pipefail
+          rm -rf "$RUNNER_TEMP/sdl-build-x86_64" && mkdir -p "$RUNNER_TEMP/sdl-build-x86_64"
+          tar xf "$RUNNER_TEMP/SDL2.tar.gz" -C "$RUNNER_TEMP/sdl-build-x86_64" --strip-components=1
+          cd "$RUNNER_TEMP/sdl-build-x86_64"
+          arch -x86_64 /bin/bash -c "
+            set -euo pipefail
+            export CFLAGS='-arch x86_64 -mmacosx-version-min=${MIN_OS}'
+            export CXXFLAGS=\"\$CFLAGS\" LDFLAGS=\"\$CFLAGS\"
+            ./configure --prefix='$RUNNER_TEMP/sdl-x86_64' --without-x
+            make -j\"\$(sysctl -n hw.ncpu)\"
+            make install
+          "
+          SIZE=$(stat -f%z "$RUNNER_TEMP/sdl-x86_64/lib/libSDL2-2.0.0.dylib")
+          echo "x86_64 libSDL2 size=$SIZE"
+          [ "$SIZE" -gt 1000000 ] || { echo "### 疑似 sdl2-compat shim ###"; exit 1; }
+          otool -L "$RUNNER_TEMP/sdl-x86_64/lib/libSDL2-2.0.0.dylib" | grep -qi SDL3 && { echo "### 混入 SDL3 ###"; exit 1; } || true
+
+      - name: 取 ScummVM 並套 agos-cht.patch(兩份獨立 checkout，各編一弧免污染)
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "$SCUMMVM_TAG" https://github.com/scummvm/scummvm.git "$RUNNER_TEMP/scummvm-arm64"
+          ( cd "$RUNNER_TEMP/scummvm-arm64" && git apply --whitespace=nowarn "$GITHUB_WORKSPACE/cht/patches/agos-cht.patch" )
+          echo "✓ patch 套用成功"
+          rm -rf "$RUNNER_TEMP/scummvm-x86_64"
+          cp -a "$RUNNER_TEMP/scummvm-arm64" "$RUNNER_TEMP/scummvm-x86_64"
+
+      - name: configure + make scummvm-static — arm64(native)
+        working-directory: ${{ runner.temp }}/scummvm-arm64
+        run: |
+          set -euo pipefail
+          export CXXFLAGS="-arch arm64 -mmacosx-version-min=${MIN_OS}"
+          export LDFLAGS="$CXXFLAGS"
+          ./configure --disable-all-engines --enable-engine=agos --disable-detection-full \
+            --enable-release $LEAN_FLAGS --with-sdl-prefix="$RUNNER_TEMP/sdl-arm64"
+          grep -q "^ENABLE_AGOS" config.mk || { echo "### agos 未編入(arm64) ###"; exit 12; }
+          grep -q "^SDL_BACKEND = 1" config.mk || { echo "### SDL 未偵測(arm64) ###"; exit 13; }
+          grep -q "^#define USE_MT32EMU" config.h || { echo "### MT-32 未啟用(arm64) ###"; exit 14; }
+          make -j"$(sysctl -n hw.ncpu)" scummvm-static
+
+      - name: configure + make scummvm-static — x86_64(Rosetta)
+        working-directory: ${{ runner.temp }}/scummvm-x86_64
+        run: |
+          set -euo pipefail
+          arch -x86_64 /bin/bash -c "
+            set -euo pipefail
+            export CXXFLAGS='-arch x86_64 -mmacosx-version-min=${MIN_OS}'
+            export LDFLAGS=\"\$CXXFLAGS\"
+            ./configure --disable-all-engines --enable-engine=agos --disable-detection-full \
+              --enable-release $LEAN_FLAGS --with-sdl-prefix='$RUNNER_TEMP/sdl-x86_64'
+            grep -q '^ENABLE_AGOS' config.mk || { echo '### agos 未編入(x86_64) ###'; exit 12; }
+            grep -q '^SDL_BACKEND = 1' config.mk || { echo '### SDL 未偵測(x86_64) ###'; exit 13; }
+            grep -q '^#define USE_MT32EMU' config.h || { echo '### MT-32 未啟用(x86_64) ###'; exit 14; }
+            make -j\"\$(sysctl -n hw.ncpu)\" scummvm-static
+          "
+
+      - name: lipo universal scummvm-static + make bundle(ScummVM.app)
+        working-directory: ${{ runner.temp }}/scummvm-arm64
+        run: |
+          set -euo pipefail
+          lipo -create \
+            "${{ runner.temp }}/scummvm-arm64/scummvm-static" \
+            "${{ runner.temp }}/scummvm-x86_64/scummvm-static" \
+            -output scummvm-static-universal
+          lipo -info scummvm-static-universal | grep -q arm64
+          lipo -info scummvm-static-universal | grep -q x86_64
+          make bundle
+          cp scummvm-static-universal ScummVM.app/Contents/MacOS/scummvm
+          chmod 755 ScummVM.app/Contents/MacOS/scummvm
+
+      - name: lipo universal SDL2 → Frameworks，install_name_tool，ad-hoc 簽
+        working-directory: ${{ runner.temp }}/scummvm-arm64
+        run: |
+          set -euo pipefail
+          APP=ScummVM.app
+          BIN="$APP/Contents/MacOS/scummvm"
+          mkdir -p "$APP/Contents/Frameworks"
+          FW="$APP/Contents/Frameworks/libSDL2-2.0.0.dylib"
+          lipo -create \
+            "$RUNNER_TEMP/sdl-arm64/lib/libSDL2-2.0.0.dylib" \
+            "$RUNNER_TEMP/sdl-x86_64/lib/libSDL2-2.0.0.dylib" \
+            -output "$FW"
+          install_name_tool -id "@executable_path/../Frameworks/libSDL2-2.0.0.dylib" "$FW"
+          install_name_tool -change "$RUNNER_TEMP/sdl-arm64/lib/libSDL2-2.0.0.dylib"   "@executable_path/../Frameworks/libSDL2-2.0.0.dylib" "$BIN" || true
+          install_name_tool -change "$RUNNER_TEMP/sdl-x86_64/lib/libSDL2-2.0.0.dylib" "@executable_path/../Frameworks/libSDL2-2.0.0.dylib" "$BIN" || true
+          install_name_tool -change "@rpath/libSDL2-2.0.0.dylib" "@executable_path/../Frameworks/libSDL2-2.0.0.dylib" "$BIN" || true
+          codesign --force --sign - "$FW"
+          codesign --force --deep --sign - "$APP"
+          echo "=== 驗證：主程式與 SDL2 都雙弧 ==="
+          lipo -info "$BIN" | grep -q arm64 && lipo -info "$BIN" | grep -q x86_64
+          lipo -info "$FW"  | grep -q arm64 && lipo -info "$FW"  | grep -q x86_64
+          echo "=== 驗證：無殘留 build 期絕對路徑 ==="
+          if otool -L "$BIN" | grep -E "$RUNNER_TEMP|/Users/runner"; then echo "### 殘留依賴 ###"; exit 1; fi
+          echo OK
+
+      - name: 組裝發佈資料夾(.app + 繁中字型 game/ + 啟動器 + README，不含遊戲/ROM)
+        working-directory: ${{ runner.temp }}/scummvm-arm64
+        run: |
+          set -euo pipefail
+          OUT="$GITHUB_WORKSPACE/dist-macos/蠟像館之謎-CHT-macOS-universal"
+          rm -rf "$OUT" && mkdir -p "$OUT/game" "$OUT/saves"
+          cp -R ScummVM.app "$OUT/"
+          cp "$GITHUB_WORKSPACE/cht/fonts/waxworks_zh16.dcjk" \
+             "$GITHUB_WORKSPACE/cht/fonts/waxworks_zh24.dcjk" \
+             "$GITHUB_WORKSPACE/cht/fonts/waxworks_zh.tab" "$OUT/game/"
           cat > "$OUT/play-waxworks.command" <<'SH'
           #!/bin/bash
           cd "$(dirname "$0")"
-          xattr -dr com.apple.quarantine ./scummvm 2>/dev/null || true
-          ./scummvm -p game --themepath=data --extrapath=game \
+          xattr -dr com.apple.quarantine ./ScummVM.app 2>/dev/null || true
+          ./ScummVM.app/Contents/MacOS/scummvm -p game --extrapath=game \
             --music-driver=mt32 --auto-detect --savepath=saves
           SH
           chmod +x "$OUT/play-waxworks.command"
           cat > "$OUT/README.txt" <<'TXT'
-          《蠟像館之謎》繁體中文版 — macOS universal（patched ScummVM）
+          《蠟像館之謎》繁體中文版 — macOS universal(arm64 + x86_64) patched ScummVM
 
           使用方式：
-          1. 把你合法擁有的 Waxworks(Floppy/DOS) 原檔（GAMEPC、TABLES01…、TEXT01…、
-             ROOMS0x、STATELST 等全部檔案）複製進本資料夾的 game/ 子目錄。
+          1. 把你合法擁有的 Waxworks(Floppy/DOS) 原檔(GAMEPC、TABLES01…、TEXT01…、
+             ROOMS0x、STATELST 等全部檔案)複製進 game/ 子目錄。
           2. 想要原版 MT-32 真實配樂：把 MT32_CONTROL.ROM 與 MT32_PCM.ROM 也放進 game/。
-             （沒有 ROM 也能玩，會改用一般 MIDI 音色。）
-          3. 雙擊 play-waxworks.command 開始遊戲。
-             首次執行若被 Gatekeeper 擋，於「系統設定 → 隱私權與安全性」允許，或右鍵→打開。
-
-          繁中字型（waxworks_zh*.dcjk / .tab）已內含於 game/。
-          本套件不含遊戲原檔與 ROM（尊重原作版權，patch-only）。
+          3. 雙擊 play-waxworks.command。首次被 Gatekeeper 擋：右鍵→打開，或
+             系統設定→隱私權與安全性→允許。
+          繁中字型(waxworks_zh*.dcjk/.tab)已內含於 game/。本套件不含遊戲原檔與 ROM。
           TXT
-          zip -rq "${OUT}.zip" "$OUT"
-          ls -lh "${OUT}.zip"
 
-      - name: 上傳 macOS universal zip
-        uses: actions/upload-artifact@v4
+      - name: 打包 .tar.gz(保 perm，繞 APFS) + .dmg
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/dist-macos"
+          tar czf 蠟像館之謎-CHT-macOS-universal.tar.gz 蠟像館之謎-CHT-macOS-universal
+          hdiutil create -volname "蠟像館之謎-CHT" \
+            -srcfolder 蠟像館之謎-CHT-macOS-universal -ov -format UDZO \
+            蠟像館之謎-CHT-macOS-universal.dmg
+          ls -la
+
+      - uses: actions/upload-artifact@v4
         with:
           name: 蠟像館之謎-CHT-macOS-universal
-          path: 蠟像館之謎-CHT-macOS-universal.zip
+          path: |
+            dist-macos/蠟像館之謎-CHT-macOS-universal.tar.gz
+            dist-macos/蠟像館之謎-CHT-macOS-universal.dmg
 
-      - name: 附加到 Release（打 tag 時）
+      - name: 附加到 Release(打 tag 時)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: 蠟像館之謎-CHT-macOS-universal.zip
+          files: |
+            dist-macos/蠟像館之謎-CHT-macOS-universal.tar.gz
+            dist-macos/蠟像館之謎-CHT-macOS-universal.dmg
