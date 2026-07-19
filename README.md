@@ -8,7 +8,11 @@
 
 ![中文標題畫面](docs/img/title_zh.png)
 
-> 🎬 **推廣片**：`蠟像館之謎_繁中版_推廣片.mp4`（隨 Release 發布）——全程實機畫面配**原版 MT-32 真實配樂**：中文對白逐字浮現、水晶球裡叔叔亡靈的中文遺言、動態地圖與友善作弊即時疊層。不是靜態改圖，是引擎當場翻譯。
+### 🎬 推廣片（YouTube）
+
+[![蠟像館之謎 繁體中文版 推廣片](https://img.youtube.com/vi/TzrjTDRHPoY/hqdefault.jpg)](https://youtu.be/TzrjTDRHPoY)
+
+**[▶ 點我在 YouTube 觀看](https://youtu.be/TzrjTDRHPoY)**——全程實機畫面配**原版 MT-32 真實配樂**：中文對白逐字浮現、水晶球裡叔叔亡靈的中文遺言、動態地圖與友善作弊即時疊層。不是靜態改圖，是引擎當場翻譯。
 
 ---
 
