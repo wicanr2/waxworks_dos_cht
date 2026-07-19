@@ -50,7 +50,7 @@ index af27f131..5516215a 100644
  
  	if (getGameType() != GType_PP && getGameType() != GType_FF) {
 diff --git a/engines/agos/agos.h b/engines/agos/agos.h
-index 6a8d2237..7b18195f 100644
+index 6a8d2237..226649e9 100644
 --- a/engines/agos/agos.h
 +++ b/engines/agos/agos.h
 @@ -37,6 +37,7 @@
@@ -61,7 +61,7 @@ index 6a8d2237..7b18195f 100644
  #include "agos/detection.h"
  
  /**
-@@ -386,6 +387,18 @@ protected:
+@@ -386,6 +387,19 @@ protected:
  	bool _pause;
  	bool _speech;
  	bool _subtitles;
@@ -76,11 +76,12 @@ index 6a8d2237..7b18195f 100644
 +	byte _chtLead = 0;        // windowPutChar Big5 雙位元組狀態
 +	bool _chtMapOn = false;   // 動態地圖顯示中(現代玩家友善化，TAB 切換)
 +	bool _chtGodMode = false; // 友善/無敵模式(F7 切換，HP+心靈力保持滿)
++	int _chtVerbId = 0;       // 當前 verb 圖示條選中的 verb(ha->id)，供中文 overlay 每幀重繪
 +
  	bool _vgaVar9;
  	int16 _chanceModifier;
  	bool _restoreWindow6;
-@@ -958,6 +971,15 @@ protected:
+@@ -958,6 +972,16 @@ protected:
  	void renderStringAmiga(uint vgaSpriteId, uint color, uint width, uint height, const char *txt);
  	void renderString(uint vgaSpriteId, uint color, uint width, uint height, const char *txt);
  
@@ -89,6 +90,7 @@ index 6a8d2237..7b18195f 100644
 +	byte chtReadableColor(byte idx);   // 亮度守門:只救暗到讀不到的字色
 +	byte chtOutlineColor();            // 描邊用最暗的非 0 索引
 +	void chtDrawMap();                 // 動態地圖(現代玩家友善化)
++	void chtDrawVerbName();            // verb 圖示條中文 overlay(蓋掉烘進 VGA 的英文)
 +	void chtDrawMapLabel(int x, int y, const char *big5);  // 地圖用 16px 中文標籤
 +	bool chtRoomHasTreasure(uint16 roomId);
 +	bool chtRoomHasMonster(uint16 roomId);   // 怪物: objectFlags 僅 kOFText(0x01)
@@ -97,10 +99,18 @@ index 6a8d2237..7b18195f 100644
  
  	byte *allocBlock(uint32 size);
 diff --git a/engines/agos/charset-fontdata.cpp b/engines/agos/charset-fontdata.cpp
-index 193986e3..70360f4d 100644
+index 193986e3..79006aaf 100644
 --- a/engines/agos/charset-fontdata.cpp
 +++ b/engines/agos/charset-fontdata.cpp
-@@ -2914,6 +2914,289 @@ static const byte english_pnFont[] = {
+@@ -22,6 +22,7 @@
+ #include "common/endian.h"
+ #include "common/system.h"
+ #include "common/textconsole.h"
++#include "common/file.h"
+ 
+ #include "agos/agos.h"
+ #include "agos/intern.h"
+@@ -2914,6 +2915,342 @@ static const byte english_pnFont[] = {
  	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
  };
  
@@ -387,14 +397,76 @@ index 193986e3..70360f4d 100644
 +#undef MP
 +}
 +
++// 非上游: verb 圖示條中文 overlay。verb 名是烘進 VGA 影像(zone1 sprite 106-113)的英文,
++// hover verb 時 animate(2,1,IMG) 顯示。做法: 在 window2 疊層區填取樣底色蓋掉英文(合成 v1?v1:v0
++// → 非零疊層蓋過底圖), 再畫中文 verb 名。ha->id→中文對映見下(input.cpp 設 _chtVerbId)。
++void AGOSEngine::chtDrawVerbName() {
++	if (!_chtActive || _chtSubLang != 1 || !_chtHires || !_scaleBuf || getGameType() != GType_WW)
++		return;
++	const char *nm = nullptr;
++	switch (_chtVerbId) {
++	case 98:  nm = "\xac\x64\xac\xdd"; break;   // 查看
++	case 108: nm = "\xae\xb3\xa8\xfa"; break;   // 拿取
++	case 109: nm = "\xa5\xb4\xb6\x7d"; break;   // 打開
++	case 115: nm = "\xc3\xf6\xa4\x57"; break;   // 關上
++	case 116: nm = "\xa8\xcf\xa5\xce"; break;   // 使用
++	case 117: nm = "\xb5\xb9\xa4\xa9"; break;   // 給予
++	case 118: nm = "\xb2\xbe\xb0\xca"; break;   // 移動
++	case 119: nm = "\xa5\xe6\xbd\xcd"; break;   // 交談
++	default: return;
++	}
++	WindowBlock *w = _windowArray[2];
++	if (!w)
++		return;
++	int hx = w->x * 16, hy = w->y * 2, hw = w->width * 16, hh = w->height * 16;
++	if (hw <= 0 || hh <= 0)
++		return;
++	// 取樣底色(從 _backBuf window2 左上角)蓋英文; 避免 0(疊層透明哨兵)
++	byte bg = 0;
++	if (_backBuf) {
++		byte *bp = (byte *)_backBuf->getPixels();
++		int sx = w->x * 8, sy = w->y;
++		if (sx >= 0 && sx < _backBuf->w && sy >= 0 && sy < _backBuf->h)
++			bg = bp[sy * _backBuf->pitch + sx];
++	}
++	if (bg == 0)
++		bg = chtOutlineColor();
++	byte *hp = (byte *)_scaleBuf->getPixels();
++	uint pitch = _scaleBuf->pitch;
++	// 選 verb 時該框只有 verb 名 → 蓋滿整個 window2 疊層區(徹底蓋掉英文含 .ENTER 第二行)
++	for (int yy = 0; yy < hh; yy++) {
++		int py = hy + yy;
++		if (py < 0 || py >= _scaleBuf->h) continue;
++		int x0 = hx < 0 ? 0 : hx, x1 = hx + hw;
++		if (x1 > _scaleBuf->w) x1 = _scaleBuf->w;
++		for (int px = x0; px < x1; px++) hp[py * pitch + px] = bg;
++	}
++	int nchars = (int)strlen(nm) / 2;
++	int tw = nchars * _cht.fontW16;
++	int bx = hx + (hw - tw) / 2;
++	if (bx < hx) bx = hx;
++	int by = hy + (hh - _cht.fontH16) / 2;   // 垂直置中
++	if (by < hy) by = hy;
++	chtDrawMapLabel(bx, by, nm);
++}
++
  void AGOSEngine::windowDrawChar(WindowBlock *window, uint x, uint y, byte chr) {
  	const byte *src;
  	byte color, *dst;
 diff --git a/engines/agos/charset.cpp b/engines/agos/charset.cpp
-index 05451427..43a7c76f 100644
+index 05451427..9ac5d510 100644
 --- a/engines/agos/charset.cpp
 +++ b/engines/agos/charset.cpp
-@@ -147,8 +147,9 @@ void AGOSEngine::justifyOutPut(byte chr) {
+@@ -102,6 +102,8 @@ void AGOSEngine::showMessageFormat(const char *s, ...) {
+ 	char *str;
+ 	va_list va;
+ 
++	_chtVerbId = 0;   // 非上游: 有訊息/對白要顯示 → 清掉 verb 中文 overlay(免蓋到對白)
++
+ 	va_start(va, s);
+ 	vsnprintf(buf, STRINGBUFLEN, s, va);
+ 	va_end(va);
+@@ -147,8 +149,9 @@ void AGOSEngine::justifyOutPut(byte chr) {
  		_printCharPixelCount = 0;
  		doOutput(&chr, 1);
  		clsCheck(_textWindow);
@@ -406,7 +478,7 @@ index 05451427..43a7c76f 100644
  		_lettersToPrintBuf[0] = chr;
  		_lettersToPrintBuf[1] = '\0';
  		doOutput(_lettersToPrintBuf, 1);
-@@ -221,6 +222,32 @@ void AGOSEngine::windowPutChar(WindowBlock *window, byte c, byte b) {
+@@ -221,6 +224,32 @@ void AGOSEngine::windowPutChar(WindowBlock *window, byte c, byte b) {
  	byte width = 6;
  	byte textColumnWidth = 8;
  
@@ -439,7 +511,7 @@ index 05451427..43a7c76f 100644
  	if (c == 12) {
  		clearWindow(window);
  	} else if (c == 13 || c == 10) {
-@@ -388,6 +415,19 @@ void AGOSEngine::windowScroll(WindowBlock *window) {
+@@ -388,6 +417,19 @@ void AGOSEngine::windowScroll(WindowBlock *window) {
  			} while (--h1);
  		}
  
@@ -674,15 +746,17 @@ index 3cb73123..193d8e4e 100644
  			uint8 ptch = 16;
  			uint16 *dst1 = &((uint16*)_mouseData)[16 * 16 * 2 - 1];
 diff --git a/engines/agos/draw.cpp b/engines/agos/draw.cpp
-index 944797f9..866a0ebd 100644
+index 944797f9..da0c208b 100644
 --- a/engines/agos/draw.cpp
 +++ b/engines/agos/draw.cpp
-@@ -840,6 +840,11 @@ void AGOSEngine::displayScreen() {
+@@ -840,6 +840,13 @@ void AGOSEngine::displayScreen() {
  		}
  	}
  
 +	if (_chtMapOn)
 +		chtDrawMap();   // 非上游: 動態地圖每幀重繪(覆蓋 clearWindow 對疊層的抹除)
++	else if (_chtVerbId)
++		chtDrawVerbName();   // 非上游: verb 圖示條中文 overlay(地圖開時不畫,免衝突)
 +	if (_chtGodMode && _chtHires && _scaleBuf)
 +		chtDrawMapLabel(504, 4, "\xb5\x4c\xbc\xc4\xbc\xd2\xa6\xa1");   // 非上游: 右上角「無敵模式」指示
 +
@@ -761,6 +835,31 @@ index 06dfaef6..d9732f4a 100644
  		int x = 0;
  		int y = 0;
  		int w = _screenWidth;
+diff --git a/engines/agos/input.cpp b/engines/agos/input.cpp
+index 88d98b7f..1cb02790 100644
+--- a/engines/agos/input.cpp
++++ b/engines/agos/input.cpp
+@@ -294,6 +294,7 @@ void AGOSEngine::waitForInput() {
+ 					animate(2, 1, 111, 0, 0, 0);
+ 					waitForSync(34);
+ 				}
++				_chtVerbId = ha->id;   // 非上游: 記錄當前 verb, 供中文 overlay 每幀重繪蓋掉英文
+ 			}
+ 			if (ha->itemPtr && (!ha->verb || _verbHitArea ||
+ 					(_hitAreaSubjectItem != ha->itemPtr && (ha->flags & kBFBoxItem)))
+diff --git a/engines/agos/menus.cpp b/engines/agos/menus.cpp
+index 008162eb..ed1eed9d 100644
+--- a/engines/agos/menus.cpp
++++ b/engines/agos/menus.cpp
+@@ -244,6 +244,8 @@ uint AGOSEngine::menuFor_ww(Item *item, uint id) {
+ void AGOSEngine::clearMenuStrip() {
+ 	int i;
+ 
++	_chtVerbId = 0;   // 非上游: 選單清除 → 清掉 verb 中文 overlay
++
+ 	for (i = 111; i != 115; i++)
+ 		disableBox(i);
+ 
 diff --git a/engines/agos/module.mk b/engines/agos/module.mk
 index 37432e1e..be4c4ce4 100644
 --- a/engines/agos/module.mk
