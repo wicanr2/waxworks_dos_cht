@@ -28,15 +28,12 @@ env:
   # AGOS(Waxworks floppy)精簡：只需自編 universal SDL2 + 內建 mt32emu(MT-32)
   # + 內建 nuked-opl(AdLib)。其餘外部媒體/格式/網路庫全關(scummvm-static 需靜態 .a，
   # runner 沒有；Linux 端已驗證 AGOS 在 --disable-zlib 等精簡下中文正常)。
+  # 這組是 Linux docker 對 ScummVM v2.9.1 實測「configure 接受 + AGOS 編出 + Waxworks
+  # 中文正常」的精簡集(別照抄較新版 qfg2 的旗標，如 --disable-system-printing 在 2.9.1 不存在)。
   LEAN_FLAGS: >-
-    --disable-mad --disable-ogg --disable-vorbis --disable-tremor --disable-flac
-    --disable-faad --disable-mpcdec --disable-openmpt --disable-mikmod
-    --disable-fluidsynth --disable-fluidlite --disable-sonivox
-    --disable-theoradec --disable-vpx --disable-mpeg2 --disable-a52
-    --disable-png --disable-jpeg --disable-gif --disable-freetype2 --disable-fribidi
-    --disable-zlib --disable-libcurl --disable-cloud --disable-enet --disable-sdlnet
-    --disable-discord --disable-sparkle --disable-lua
-    --disable-tts --disable-taskbar --disable-system-dialogs --disable-system-printing
+    --disable-mad --disable-vorbis --disable-flac --disable-fluidsynth
+    --disable-mpeg2 --disable-theoradec --disable-faad --disable-libcurl
+    --disable-zlib --disable-png --disable-freetype2 --disable-sdlnet
 
 jobs:
   macos-universal:
