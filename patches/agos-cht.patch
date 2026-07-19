@@ -97,10 +97,10 @@ index 6a8d2237..7b18195f 100644
  
  	byte *allocBlock(uint32 size);
 diff --git a/engines/agos/charset-fontdata.cpp b/engines/agos/charset-fontdata.cpp
-index 193986e3..511f336f 100644
+index 193986e3..70360f4d 100644
 --- a/engines/agos/charset-fontdata.cpp
 +++ b/engines/agos/charset-fontdata.cpp
-@@ -2914,6 +2914,273 @@ static const byte english_pnFont[] = {
+@@ -2914,6 +2914,289 @@ static const byte english_pnFont[] = {
  	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
  };
  
@@ -337,9 +337,25 @@ index 193986e3..511f336f 100644
 +		Item *room = derefItem(ids[k]);
 +		if (!room) continue;
 +		bool cur = (ids[k] == _currentRoom);
-+		if (cur) {   // 當前房間: 內部填亮色
++		if (cur) {   // 當前房間: 白底 + 朝向暗色三角箭頭(指北針)
 +			for (int yy = gy + 2; yy < gy + cell - 2; yy++)
 +				for (int xx = gx + 2; xx < gx + cell - 2; xx++) MP(xx, yy, wallc);
++			int dir = _variableArray[0] & 3;   // 0北 1東 2南 3西(F9 實測)
++			int a = 3, b = cell - 4, span = (b - a > 0) ? (b - a) : 1, hmax = cell / 2 - 3;
++			if (hmax < 1) hmax = 1;
++			if (dir == 0 || dir == 2) {         // 垂直箭頭
++				for (int yy = a; yy <= b; yy++) {
++					int prog = (dir == 0) ? (yy - a) : (b - yy);
++					int hw = prog * hmax / span;
++					for (int xx = -hw; xx <= hw; xx++) MP(gx + cell / 2 + xx, gy + yy, dark);
++				}
++			} else {                            // 水平箭頭
++				for (int xx = a; xx <= b; xx++) {
++					int prog = (dir == 1) ? (b - xx) : (xx - a);
++					int hh = prog * hmax / span;
++					for (int yy = -hh; yy <= hh; yy++) MP(gx + xx, gy + cell / 2 + yy, dark);
++				}
++			}
 +		}
 +		for (int d = 0; d < 4; d++) {   // 牆: door==0 畫線
 +			bool wall = (getDoorState(room, d) == 0);
