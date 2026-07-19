@@ -50,7 +50,7 @@ index af27f131..5516215a 100644
  
  	if (getGameType() != GType_PP && getGameType() != GType_FF) {
 diff --git a/engines/agos/agos.h b/engines/agos/agos.h
-index 6a8d2237..226649e9 100644
+index 6a8d2237..55c3b072 100644
 --- a/engines/agos/agos.h
 +++ b/engines/agos/agos.h
 @@ -37,6 +37,7 @@
@@ -61,7 +61,7 @@ index 6a8d2237..226649e9 100644
  #include "agos/detection.h"
  
  /**
-@@ -386,6 +387,19 @@ protected:
+@@ -386,6 +387,20 @@ protected:
  	bool _pause;
  	bool _speech;
  	bool _subtitles;
@@ -77,11 +77,12 @@ index 6a8d2237..226649e9 100644
 +	bool _chtMapOn = false;   // 動態地圖顯示中(現代玩家友善化，TAB 切換)
 +	bool _chtGodMode = false; // 友善/無敵模式(F7 切換，HP+心靈力保持滿)
 +	int _chtVerbId = 0;       // 當前 verb 圖示條選中的 verb(ha->id)，供中文 overlay 每幀重繪
++	Common::HashMap<uint32, byte> _chtVisited;   // 地圖探索迷霧: 走過的房間(room id)
 +
  	bool _vgaVar9;
  	int16 _chanceModifier;
  	bool _restoreWindow6;
-@@ -958,6 +972,16 @@ protected:
+@@ -958,6 +973,16 @@ protected:
  	void renderStringAmiga(uint vgaSpriteId, uint color, uint width, uint height, const char *txt);
  	void renderString(uint vgaSpriteId, uint color, uint width, uint height, const char *txt);
  
@@ -99,7 +100,7 @@ index 6a8d2237..226649e9 100644
  
  	byte *allocBlock(uint32 size);
 diff --git a/engines/agos/charset-fontdata.cpp b/engines/agos/charset-fontdata.cpp
-index 193986e3..79006aaf 100644
+index 193986e3..df0af3fe 100644
 --- a/engines/agos/charset-fontdata.cpp
 +++ b/engines/agos/charset-fontdata.cpp
 @@ -22,6 +22,7 @@
@@ -110,7 +111,7 @@ index 193986e3..79006aaf 100644
  
  #include "agos/agos.h"
  #include "agos/intern.h"
-@@ -2914,6 +2915,342 @@ static const byte english_pnFont[] = {
+@@ -2914,6 +2915,343 @@ static const byte english_pnFont[] = {
  	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
  };
  
@@ -299,6 +300,7 @@ index 193986e3..79006aaf 100644
 +			if (getDoorState(room, d) == 0) continue;   // 牆
 +			uint16 ex = getExitOf(room, d);
 +			if (ex == 0) continue;
++			if (!_chtVisited.contains(ex)) continue;   // 探索迷霧: 只顯示走過的房間
 +			bool have = false;
 +			for (int k = 0; k < n; k++) if (ids[k] == ex) { have = true; break; }
 +			if (have || n >= MAXR) continue;
@@ -746,13 +748,15 @@ index 3cb73123..193d8e4e 100644
  			uint8 ptch = 16;
  			uint16 *dst1 = &((uint16*)_mouseData)[16 * 16 * 2 - 1];
 diff --git a/engines/agos/draw.cpp b/engines/agos/draw.cpp
-index 944797f9..da0c208b 100644
+index 944797f9..27157cb3 100644
 --- a/engines/agos/draw.cpp
 +++ b/engines/agos/draw.cpp
-@@ -840,6 +840,13 @@ void AGOSEngine::displayScreen() {
+@@ -840,6 +840,15 @@ void AGOSEngine::displayScreen() {
  		}
  	}
  
++	if (_chtActive && getGameType() == GType_WW && _currentRoom)
++		_chtVisited[_currentRoom] = 1;   // 非上游: 記錄走過的房間(探索迷霧)
 +	if (_chtMapOn)
 +		chtDrawMap();   // 非上游: 動態地圖每幀重繪(覆蓋 clearWindow 對疊層的抹除)
 +	else if (_chtVerbId)
@@ -872,6 +876,28 @@ index 37432e1e..be4c4ce4 100644
  	charset.o \
  	charset-fontdata.o \
  	contain.o \
+diff --git a/engines/agos/saveload.cpp b/engines/agos/saveload.cpp
+index b2095d1e..4211b944 100644
+--- a/engines/agos/saveload.cpp
++++ b/engines/agos/saveload.cpp
+@@ -1018,6 +1018,17 @@ void AGOSEngine::fileError(WindowBlock *window, bool saveError) {
+ 		}
+ 	}
+ 
++	// 非上游: 繁中存讀檔錯誤訊息(經 windowPutChar 的 Big5 路徑渲染)
++	if (_chtActive && _chtSubLang == 1) {
++		if (saveError) {
++			message1 = "\r   \xa6\x73\xc0\xc9\xa5\xa2\xb1\xd1\xa1\x43";   // 存檔失敗。
++			message2 = "\r   \xba\xcf\xba\xd0\xbf\xf9\xbb\x7e\xa1\x43";   // 磁碟錯誤。
++		} else {
++			message1 = "\r   \xc5\xaa\xa8\xfa\xa5\xa2\xb1\xd1\xa1\x43";   // 讀取失敗。
++			message2 = "\r  \xa7\xe4\xa4\xa3\xa8\xec\xc0\xc9\xae\xd7\xa1\x43";   // 找不到檔案。
++		}
++	}
++
+ 	if (getGameType() == GType_ELVIRA1) {
+ 		printScroll();
+ 		window->textColumn = 0;
 diff --git a/engines/agos/string.cpp b/engines/agos/string.cpp
 index 1aa590b8..14e735f2 100644
 --- a/engines/agos/string.cpp
