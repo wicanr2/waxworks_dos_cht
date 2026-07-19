@@ -30,8 +30,23 @@ jobs:
         with:
           path: cht
 
-      - name: 安裝相依（SDL2）
-        run: brew install sdl2 sdl2_net a52dec
+      - name: 自編 SDL2 靜態庫（${{ matrix.arch }} 原生）
+        run: |
+          set -e
+          SDL_VER=2.30.9
+          curl -fsSL -o sdl2.tar.gz \
+            "https://github.com/libsdl-org/SDL/releases/download/release-${SDL_VER}/SDL2-${SDL_VER}.tar.gz"
+          tar xzf sdl2.tar.gz
+          cd "SDL2-${SDL_VER}"
+          # runner 原生 arch(macos-14=arm64 / macos-13=x86_64)，非交叉編。
+          # 只建靜態庫 → 之後靜態連進 scummvm，產物不依賴外部 dylib。
+          ./configure --prefix="$GITHUB_WORKSPACE/sdlinst" \
+            --disable-shared --enable-static \
+            CC="clang -arch ${{ matrix.arch }}" CXX="clang++ -arch ${{ matrix.arch }}"
+          make -j"$(sysctl -n hw.ncpu)"
+          make install
+          echo "SDL_PREFIX=$GITHUB_WORKSPACE/sdlinst" >> "$GITHUB_ENV"
+          ls -la "$GITHUB_WORKSPACE/sdlinst/lib/libSDL2.a"
 
       - name: 取 ScummVM ${{ env.SCUMMVM_TAG }} 原始碼
         run: |
@@ -43,17 +58,25 @@ jobs:
           git apply --whitespace=nowarn "$GITHUB_WORKSPACE/cht/patches/agos-cht.patch"
           echo "✓ patch 套用成功"
 
-      - name: configure + build（AGOS only，${{ matrix.arch }}）
+      - name: configure + build（AGOS only，靜態 SDL2，${{ matrix.arch }}）
         run: |
           cd scummvm
           export CXX="clang++ -arch ${{ matrix.arch }}"
           export CC="clang -arch ${{ matrix.arch }}"
+          export PATH="$SDL_PREFIX/bin:$PATH"
           ./configure --disable-all-engines --enable-engine=agos --enable-release \
+            --with-sdl-prefix="$SDL_PREFIX" \
             --disable-mad --disable-vorbis --disable-flac --disable-fluidsynth \
             --disable-mpeg2 --disable-theoradec --disable-faad --disable-libcurl
           grep -q '^ENABLE_AGOS' config.mk || { echo '!! agos 未啟用'; exit 1; }
-          make -j$(sysctl -n hw.ncpu)
+          make -j"$(sysctl -n hw.ncpu)"
           file scummvm
+          echo "=== 相依檢查(應無外部 libSDL2.dylib, 只剩系統庫/framework) ==="
+          otool -L scummvm
+          if otool -L scummvm | grep -i 'libSDL2'; then
+            echo '!! 仍動態連到 SDL2，靜態連結失敗'; exit 1
+          fi
+          echo "✓ SDL2 已靜態連入，產物自足"
 
       - name: 上傳單一 arch binary
         uses: actions/upload-artifact@v4
